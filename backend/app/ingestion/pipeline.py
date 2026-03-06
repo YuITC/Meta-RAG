@@ -90,7 +90,7 @@ def parse_document(filename: str, content: bytes) -> str:
         return _parse_txt(content)
 
 
-def ingest_document(filename: str, content: bytes) -> int:
+def ingest_document(filename: str, content: bytes, document_id: int | None = None) -> int:
     """
     Parse, chunk, embed, and index a document.
     Returns the number of chunks indexed.
@@ -109,12 +109,12 @@ def ingest_document(filename: str, content: bytes) -> int:
         for i, chunk in enumerate(raw_chunks)
     ]
 
-    upsert_chunks(chunk_dicts)
+    upsert_chunks(chunk_dicts, document_id=document_id)
     invalidate_index()
     return len(chunk_dicts)
 
 
-def ingest_text_chunks(source: str, chunks: list[str]) -> int:
+def ingest_text_chunks(source: str, chunks: list[str], document_id: int | None = None) -> int:
     """Directly ingest pre-chunked text (e.g. from scraper)."""
     if not chunks:
         return 0
@@ -122,6 +122,6 @@ def ingest_text_chunks(source: str, chunks: list[str]) -> int:
         {"text": chunk, "source": source, "chunk_index": i}
         for i, chunk in enumerate(chunks)
     ]
-    upsert_chunks(chunk_dicts)
+    upsert_chunks(chunk_dicts, document_id=document_id)
     invalidate_index()
     return len(chunk_dicts)

@@ -92,9 +92,54 @@ export interface DocumentRead {
   updated_at: string;
 }
 
+export interface Paper {
+  title: string;
+  url: string;
+  arxiv_url: string | null;
+  github_url: string | null;
+  github_stars: string | null;
+  author: string | null;
+  published: string | null;
+  abstract: string;
+}
+
 export async function fetchDocuments(): Promise<DocumentRead[]> {
   const res = await fetch(`${API_URL}/api/documents`);
   if (!res.ok) throw new Error("Failed to fetch documents");
+  return res.json();
+}
+
+export async function deleteDocument(
+  docId: number,
+): Promise<{ message: string }> {
+  const res = await fetch(`${API_URL}/api/documents/${docId}`, {
+    method: "DELETE",
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(err.detail ?? "Delete failed");
+  }
+  return res.json();
+}
+
+export async function fetchTrendingPapers(): Promise<Paper[]> {
+  const res = await fetch(`${API_URL}/api/ingest/trending`);
+  if (!res.ok) throw new Error("Failed to fetch trending papers");
+  return res.json();
+}
+
+export async function ingestSelectedPapers(
+  papers: Paper[],
+): Promise<{ message: string; chunks_indexed: number }> {
+  const res = await fetch(`${API_URL}/api/ingest/selected`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ papers }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(err.detail ?? "Ingest failed");
+  }
   return res.json();
 }
 

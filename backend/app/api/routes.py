@@ -16,11 +16,14 @@ from app.models.schemas import (
     DocumentRead,
     DocumentUploadResponse,
     HealthResponse,
+    IngestSelectedRequest,
+    PaperInfo,
     QueryRequest,
     QueryResponse,
     RunMetrics,
 )
 from app.optimization.bandit import compute_utility
+from app.retrieval.dense import delete_by_document_id
 
 router = APIRouter()
 
@@ -214,7 +217,7 @@ async def ingest_endpoint(
         from app.database import async_session_factory
         async with async_session_factory() as session:
             try:
-                count = ingest_document(filename, file_content)
+                count = ingest_document(filename, file_content, document_id=doc_id)
                 db_doc = await session.get(Document, doc_id)
                 if db_doc:
                     db_doc.status = "indexed"
@@ -266,7 +269,7 @@ async def ingest_scrape_endpoint(
                     if paper.get("published"):
                         text += f"\nPublished: {paper['published']}"
                     source = paper.get("url") or paper["title"]
-                    total += ingest_text_chunks(source, [text])
+                    total += ingest_text_chunks(source, [text], document_id=doc_id)
                 
                 db_doc = await session.get(Document, doc_id)
                 if db_doc:
@@ -286,6 +289,87 @@ async def ingest_scrape_endpoint(
         message="Scrape job started. HuggingFace trending papers are being indexed in the background.",
         chunks_indexed=0,
     )
+
+
+@router.get("/ingest/trending", response_model=list[PaperInfo])
+async def get_trending_papers():
+    """Fetch the list of 50 trending papers without ingesting them."""
+    from scraper.scraper import fetchTrendingPapers
+    try:
+        papers = fetchTrendingPapers()
+        return [PaperInfo(**p) for p in papers]
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch papers: {str(e)}")
+
+
+@router.post("/ingest/selected", response_model=DocumentUploadResponse)
+async def ingest_selected_papers(
+    body: IngestSelectedRequest,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db)
+):
+    """Ingest a user-selected list of papers."""
+    if not body.papers:
+        raise HTTPException(status_code=400, detail="No papers selected.")
+
+    # Create a generic record for this batch
+    batch_name = f"Selected HF Papers (x{len(body.papers)})"
+    doc = Document(
+        filename=batch_name,
+        source="huggingface-selected",
+        status="processing"
+    )
+    db.add(doc)
+    await db.commit()
+    await db.refresh(doc)
+
+    async def run_selective_ingest(doc_id: int, papers_to_ingest: list[dict]):
+        from app.database import async_session_factory
+        async with async_session_factory() as session:
+            try:
+                total = 0
+                for p in papers_to_ingest:
+                    text = f"Title: {p['title']}\n\nAbstract: {p['abstract']}"
+                    if p.get("author"):
+                        text += f"\n\nAuthor: {p['author']}"
+                    if p.get("published"):
+                        text += f"\nPublished: {p['published']}"
+                    source = p.get("url") or p["title"]
+                    total += ingest_text_chunks(source, [text], document_id=doc_id)
+                
+                db_doc = await session.get(Document, doc_id)
+                if db_doc:
+                    db_doc.status = "indexed"
+                    db_doc.chunks_count = total
+                    await session.commit()
+            except Exception as e:
+                db_doc = await session.get(Document, doc_id)
+                if db_doc:
+                    db_doc.status = "failed"
+                    db_doc.error_message = str(e)
+                    await session.commit()
+
+    background_tasks.add_task(run_selective_ingest, doc.id, [p.dict() for p in body.papers])
+
+    return DocumentUploadResponse(
+        message=f"Ingestion started for {len(body.papers)} selected papers.",
+        chunks_indexed=0,
+    )
+
+
+@router.delete("/documents/{doc_id}")
+async def delete_document(doc_id: int, db: AsyncSession = Depends(get_db)):
+    """Delete a document and its associated vector embeddings."""
+    doc = await db.get(Document, doc_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+    
+    # Delete from Qdrant using the unified document_id
+    delete_by_document_id(doc.id)
+    
+    await db.delete(doc)
+    await db.commit()
+    return {"message": "Document deleted successfully"}
 
 
 # ──────────────────────────────────────────────────────────────────────────────

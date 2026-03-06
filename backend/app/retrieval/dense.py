@@ -46,7 +46,7 @@ def text_to_id(text: str, source: str) -> int:
     return int(h[:15], 16)
 
 
-def upsert_chunks(chunks: list[dict]) -> None:
+def upsert_chunks(chunks: list[dict], document_id: int | None = None) -> None:
     """
     chunks: list of {"text": str, "source": str, "chunk_index": int}
     """
@@ -61,6 +61,7 @@ def upsert_chunks(chunks: list[dict]) -> None:
                 "text": c["text"],
                 "source": c["source"],
                 "chunk_index": c.get("chunk_index", 0),
+                "document_id": document_id,
             },
         )
         for c, v in zip(chunks, vectors)
@@ -97,3 +98,19 @@ def collection_count() -> int:
     ensure_collection()
     client = get_qdrant_client()
     return client.count(collection_name=settings.qdrant_collection).count
+
+
+def delete_by_document_id(document_id: int) -> None:
+    """Delete all points associated with a specific document ID."""
+    ensure_collection()
+    client = get_qdrant_client()
+    from qdrant_client.models import FieldCondition, Filter, MatchValue
+
+    client.delete(
+        collection_name=settings.qdrant_collection,
+        points_selector=Filter(
+            must=[
+                FieldCondition(key="document_id", match=MatchValue(value=document_id)),
+            ]
+        ),
+    )

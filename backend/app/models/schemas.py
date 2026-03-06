@@ -60,3 +60,18 @@ class DocumentRead(BaseModel):
     error_message: str | None
     created_at: datetime
     updated_at: datetime
+
+
+class PaperInfo(BaseModel):
+    title: str
+    url: str
+    arxiv_url: str | None = None
+    github_url: str | None = None
+    github_stars: str | None = None
+    author: str | None = None
+    published: str | None = None
+    abstract: str
+
+
+class IngestSelectedRequest(BaseModel):
+    papers: list[PaperInfo]

@@ -4,6 +4,7 @@ import { useState, useEffect } from "react";
 import QueryForm from "@/components/QueryForm";
 import ResultDisplay from "@/components/ResultDisplay";
 import DocumentList from "@/components/DocumentList";
+import ThemeToggle from "@/components/ThemeToggle";
 import { submitQuery, fetchBanditStats, checkHealth } from "@/lib/api";
 import type { QueryResponse, BanditStats } from "@/lib/api";
 
@@ -73,6 +74,7 @@ export default function HomePage() {
               postgres
             </div>
           )}
+          <ThemeToggle />
         </div>
       </header>
 
@@ -261,7 +263,7 @@ export default function HomePage() {
           overflow: hidden;
         }
         .bandit-type {
-          background: #111113;
+          background: var(--card-bg);
           border-bottom: 1px solid var(--border);
           padding: 8px 12px;
           font-size: 11px;
@@ -284,7 +286,8 @@ export default function HomePage() {
         }
         .bandit-table td {
           padding: 6px 12px;
-          border-bottom: 1px solid #1a1a1c;
+          border-bottom: 1px solid var(--border);
+          opacity: 0.9;
         }
         .bandit-table tr:last-child td {
           border-bottom: none;

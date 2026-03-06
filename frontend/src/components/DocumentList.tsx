@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { fetchDocuments, DocumentRead } from "@/lib/api";
+import { fetchDocuments, DocumentRead, deleteDocument } from "@/lib/api";
 
 export default function DocumentList({
   refreshTicker,
@@ -11,6 +11,7 @@ export default function DocumentList({
   const [documents, setDocuments] = useState<DocumentRead[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [deletingId, setDeletingId] = useState<number | null>(null);
 
   const loadDocs = async () => {
     try {
@@ -21,6 +22,25 @@ export default function DocumentList({
       setError("Failed to load documents");
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleDelete = async (
+    e: React.MouseEvent,
+    docId: number,
+    filename: string,
+  ) => {
+    e.stopPropagation();
+    if (!confirm(`Are you sure you want to delete "${filename}"?`)) return;
+
+    setDeletingId(docId);
+    try {
+      await deleteDocument(docId);
+      setDocuments(documents.filter((d) => d.id !== docId));
+    } catch (err) {
+      alert("Failed to delete document");
+    } finally {
+      setDeletingId(null);
     }
   };
 
@@ -65,9 +85,19 @@ export default function DocumentList({
                 <span className="doc-name" title={doc.filename}>
                   {doc.filename}
                 </span>
-                <span className={`status-badge ${doc.status}`}>
-                  {doc.status}
-                </span>
+                <div className="doc-right">
+                  <span className={`status-badge ${doc.status}`}>
+                    {doc.status}
+                  </span>
+                  <button
+                    className="btn-delete"
+                    onClick={(e) => handleDelete(e, doc.id, doc.filename)}
+                    disabled={deletingId === doc.id}
+                    title="Delete document"
+                  >
+                    {deletingId === doc.id ? "..." : "×"}
+                  </button>
+                </div>
               </div>
               <div className="doc-meta">
                 <span>{doc.chunks_count} chunks</span>
@@ -127,7 +157,7 @@ export default function DocumentList({
           border: 1px solid var(--border);
           border-radius: 6px;
           padding: 8px 12px;
-          background: #111113;
+          background: var(--card-bg);
           position: relative;
           overflow: hidden;
         }
@@ -144,7 +174,29 @@ export default function DocumentList({
           white-space: nowrap;
           overflow: hidden;
           text-overflow: ellipsis;
-          max-width: 70%;
+          max-width: 60%;
+        }
+        .doc-right {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+        }
+        .btn-delete {
+          background: none;
+          border: none;
+          color: var(--muted-fg);
+          font-size: 18px;
+          cursor: pointer;
+          padding: 0 4px;
+          line-height: 1;
+          transition: color 0.15s;
+        }
+        .btn-delete:hover:not(:disabled) {
+          color: var(--danger);
+        }
+        .btn-delete:disabled {
+          opacity: 0.5;
+          cursor: not-allowed;
         }
         .status-badge {
           font-size: 10px;

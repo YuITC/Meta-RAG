@@ -1,7 +1,13 @@
 "use client";
 
 import { useState, useRef } from "react";
-import { uploadDocument, scrapeHuggingFace } from "@/lib/api";
+import {
+  uploadDocument,
+  fetchTrendingPapers,
+  ingestSelectedPapers,
+  Paper,
+} from "@/lib/api";
+import PaperSelectionModal from "./PaperSelectionModal";
 
 interface QueryFormProps {
   onSubmit: (query: string) => void;
@@ -18,6 +24,8 @@ export default function QueryForm({
   const [uploadMsg, setUploadMsg] = useState<string | null>(null);
   const [uploadErr, setUploadErr] = useState<string | null>(null);
   const [scraping, setScraping] = useState(false);
+  const [trendingPapers, setTrendingPapers] = useState<Paper[]>([]);
+  const [showModal, setShowModal] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
 
   const handleSubmit = (e: React.FormEvent) => {
@@ -40,16 +48,32 @@ export default function QueryForm({
     if (fileRef.current) fileRef.current.value = "";
   };
 
-  const handleScrape = async () => {
+  const handleScrapeClick = async () => {
     setScraping(true);
     setUploadMsg(null);
     setUploadErr(null);
     try {
-      const result = await scrapeHuggingFace();
+      const papers = await fetchTrendingPapers();
+      setTrendingPapers(papers);
+      setShowModal(true);
+    } catch (err: unknown) {
+      setUploadErr(
+        err instanceof Error ? err.message : "Failed to fetch papers",
+      );
+    } finally {
+      setScraping(false);
+    }
+  };
+
+  const handleConfirmIngest = async (selected: Paper[]) => {
+    setScraping(true);
+    try {
+      const result = await ingestSelectedPapers(selected);
       setUploadMsg(result.message);
+      setShowModal(false);
       if (onSourceUpdated) onSourceUpdated();
     } catch (err: unknown) {
-      setUploadErr(err instanceof Error ? err.message : "Scrape failed");
+      setUploadErr(err instanceof Error ? err.message : "Ingest failed");
     } finally {
       setScraping(false);
     }
@@ -57,6 +81,14 @@ export default function QueryForm({
 
   return (
     <div className="query-form">
+      {showModal && (
+        <PaperSelectionModal
+          papers={trendingPapers}
+          onConfirm={handleConfirmIngest}
+          onCancel={() => setShowModal(false)}
+          loading={scraping}
+        />
+      )}
       {/* Document sources */}
       <div className="source-bar">
         <span className="label">data sources</span>
@@ -75,11 +107,11 @@ export default function QueryForm({
         </label>
         <button
           className="btn-ghost"
-          onClick={handleScrape}
+          onClick={handleScrapeClick}
           disabled={scraping}
-          title="Scrape top-50 trending papers from HuggingFace"
+          title="Choose trending papers from HuggingFace to ingest"
         >
-          {scraping ? "scraping..." : "scrape hf/papers"}
+          {scraping && !showModal ? "fetching..." : "scrape hf/papers"}
         </button>
         {uploadMsg && <span className="msg-ok">{uploadMsg}</span>}
         {uploadErr && <span className="msg-err">{uploadErr}</span>}
@@ -158,7 +190,7 @@ export default function QueryForm({
         }
         .query-input {
           flex: 1;
-          background: #111113;
+          background: var(--input-bg);
           border: 1px solid var(--border);
           color: var(--foreground);
           padding: 10px 14px;

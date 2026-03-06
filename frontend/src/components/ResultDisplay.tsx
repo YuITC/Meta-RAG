@@ -14,15 +14,30 @@ const CONFIG_LABELS: Record<string, string> = {
   C: "C  top_k=10 chunk=512  rerank=on",
 };
 
-function MetricBar({ label, value, max, color }: { label: string; value: number; max: number; color: string }) {
+function MetricBar({
+  label,
+  value,
+  max,
+  color,
+}: {
+  label: string;
+  value: number;
+  max: number;
+  color: string;
+}) {
   const pct = Math.min(100, (value / max) * 100);
   return (
     <div className="metric-row">
       <span className="metric-label">{label}</span>
       <div className="metric-bar-track">
-        <div className="metric-bar-fill" style={{ width: `${pct}%`, background: color }} />
+        <div
+          className="metric-bar-fill"
+          style={{ width: `${pct}%`, background: color }}
+        />
       </div>
-      <span className="metric-value">{typeof value === "number" ? value.toFixed(3) : value}</span>
+      <span className="metric-value">
+        {typeof value === "number" ? value.toFixed(3) : value}
+      </span>
     </div>
   );
 }
@@ -58,7 +73,11 @@ export default function ResultDisplay({ result, query }: ResultDisplayProps) {
       label: "retrieve",
       detail: `config ${metrics.config} · ${metrics.hops} hop${metrics.hops !== 1 ? "s" : ""}`,
     },
-    { step: "03", label: "read", detail: `${citations.length} citations extracted` },
+    {
+      step: "03",
+      label: "read",
+      detail: `${citations.length} citations extracted`,
+    },
     { step: "04", label: "write", detail: `answer generated` },
     {
       step: "05",
@@ -83,16 +102,39 @@ export default function ResultDisplay({ result, query }: ResultDisplayProps) {
       <section className="panel">
         <div className="panel-header">
           metrics
-          <span className="config-badge">{CONFIG_LABELS[metrics.config] ?? metrics.config}</span>
+          <span className="config-badge">
+            {CONFIG_LABELS[metrics.config] ?? metrics.config}
+          </span>
         </div>
         <div className="metrics-grid">
-          <MetricBar label="faithfulness" value={metrics.faithfulness} max={1} color="var(--success)" />
-          <MetricBar label="utility" value={metrics.utility} max={1} color="var(--accent)" />
-          <MetricBar label="latency" value={metrics.latency} max={15} color="var(--warning)" />
-          <MetricBar label="cost ($)" value={metrics.cost} max={0.005} color="var(--muted-fg)" />
+          <MetricBar
+            label="faithfulness"
+            value={metrics.faithfulness}
+            max={1}
+            color="var(--success)"
+          />
+          <MetricBar
+            label="utility"
+            value={metrics.utility}
+            max={1}
+            color="var(--accent)"
+          />
+          <MetricBar
+            label="latency"
+            value={metrics.latency}
+            max={15}
+            color="var(--warning)"
+          />
+          <MetricBar
+            label="cost ($)"
+            value={metrics.cost}
+            max={0.005}
+            color="var(--muted-fg)"
+          />
         </div>
         <div className="metrics-raw">
-          latency {metrics.latency.toFixed(2)}s · cost ${metrics.cost.toFixed(6)} · utility {metrics.utility.toFixed(4)}
+          latency {metrics.latency.toFixed(2)}s · cost $
+          {metrics.cost.toFixed(6)} · utility {metrics.utility.toFixed(4)}
         </div>
       </section>
 
@@ -135,7 +177,7 @@ export default function ResultDisplay({ result, query }: ResultDisplayProps) {
           overflow: hidden;
         }
         .panel-header {
-          background: #111113;
+          background: var(--card-bg);
           border-bottom: 1px solid var(--border);
           padding: 8px 16px;
           font-size: 11px;
@@ -166,7 +208,9 @@ export default function ResultDisplay({ result, query }: ResultDisplayProps) {
           position: relative;
           padding-bottom: 12px;
         }
-        .stage:last-child { padding-bottom: 0; }
+        .stage:last-child {
+          padding-bottom: 0;
+        }
         .stage-dot {
           width: 8px;
           height: 8px;
@@ -262,7 +306,9 @@ export default function ResultDisplay({ result, query }: ResultDisplayProps) {
           padding: 10px 16px;
           border-bottom: 1px solid var(--border);
         }
-        .citation:last-child { border-bottom: none; }
+        .citation:last-child {
+          border-bottom: none;
+        }
         .citation-index {
           color: var(--accent);
           font-size: 12px;
