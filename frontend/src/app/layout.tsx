@@ -6,6 +6,8 @@ export const metadata: Metadata = {
   description: "Self-optimizing RAG pipeline with Thompson Sampling",
 };
 
+import ToastContainer from "@/components/Toast";
+
 export default function RootLayout({
   children,
 }: {
@@ -13,7 +15,10 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en">
-      <body>{children}</body>
+      <body>
+        {children}
+        <ToastContainer />
+      </body>
     </html>
   );
 }

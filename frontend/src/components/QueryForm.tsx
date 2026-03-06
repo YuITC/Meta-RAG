@@ -8,6 +8,7 @@ import {
   Paper,
 } from "@/lib/api";
 import PaperSelectionModal from "./PaperSelectionModal";
+import { toast } from "./Toast";
 
 interface QueryFormProps {
   onSubmit: (query: string) => void;
@@ -21,8 +22,6 @@ export default function QueryForm({
   loading,
 }: QueryFormProps) {
   const [query, setQuery] = useState("");
-  const [uploadMsg, setUploadMsg] = useState<string | null>(null);
-  const [uploadErr, setUploadErr] = useState<string | null>(null);
   const [scraping, setScraping] = useState(false);
   const [trendingPapers, setTrendingPapers] = useState<Paper[]>([]);
   const [showModal, setShowModal] = useState(false);
@@ -36,28 +35,24 @@ export default function QueryForm({
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    setUploadMsg(null);
-    setUploadErr(null);
     try {
       const result = await uploadDocument(file);
-      setUploadMsg(`${result.message}`);
+      toast.success(result.message);
       if (onSourceUpdated) onSourceUpdated();
     } catch (err: unknown) {
-      setUploadErr(err instanceof Error ? err.message : "Upload failed");
+      toast.error(err instanceof Error ? err.message : "Upload failed");
     }
     if (fileRef.current) fileRef.current.value = "";
   };
 
   const handleScrapeClick = async () => {
     setScraping(true);
-    setUploadMsg(null);
-    setUploadErr(null);
     try {
       const papers = await fetchTrendingPapers();
       setTrendingPapers(papers);
       setShowModal(true);
     } catch (err: unknown) {
-      setUploadErr(
+      toast.error(
         err instanceof Error ? err.message : "Failed to fetch papers",
       );
     } finally {
@@ -69,11 +64,11 @@ export default function QueryForm({
     setScraping(true);
     try {
       const result = await ingestSelectedPapers(selected);
-      setUploadMsg(result.message);
+      toast.success(result.message);
       setShowModal(false);
       if (onSourceUpdated) onSourceUpdated();
     } catch (err: unknown) {
-      setUploadErr(err instanceof Error ? err.message : "Ingest failed");
+      toast.error(err instanceof Error ? err.message : "Ingest failed");
     } finally {
       setScraping(false);
     }
@@ -113,8 +108,6 @@ export default function QueryForm({
         >
           {scraping && !showModal ? "fetching..." : "scrape hf/papers"}
         </button>
-        {uploadMsg && <span className="msg-ok">{uploadMsg}</span>}
-        {uploadErr && <span className="msg-err">{uploadErr}</span>}
       </div>
 
       {/* Query input */}

@@ -154,10 +154,19 @@ async def query_endpoint(body: QueryRequest, db: AsyncSession = Depends(get_db))
 def _extract_citations(answer: str, docs: list[dict]) -> list[CitedChunk]:
     """Extract [N] citation references from the answer and map to source docs."""
     cited_indices = set()
-    for m in re.finditer(r"\[(\d+)\]", answer):
-        idx = int(m.group(1))
-        if 1 <= idx <= len(docs):
-            cited_indices.add(idx)
+    # Find all brackets containing numbers, potentially separated by commas/spaces
+    # e.g., [1], [1, 2], [1, 2, 3]
+    for m in re.finditer(r"\[([\d\s,]+)\]", answer):
+        content = m.group(1)
+        # Split by comma and clean up
+        parts = content.split(",")
+        for p in parts:
+            try:
+                idx = int(p.strip())
+                if 1 <= idx <= len(docs):
+                    cited_indices.add(idx)
+            except ValueError:
+                continue
 
     citations = []
     for idx in sorted(cited_indices):
@@ -312,51 +321,79 @@ async def ingest_selected_papers(
     background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db)
 ):
-    """Ingest a user-selected list of papers."""
+    """Ingest each user-selected paper as a separate document."""
     if not body.papers:
         raise HTTPException(status_code=400, detail="No papers selected.")
 
-    # Create a generic record for this batch
-    batch_name = f"Selected HF Papers (x{len(body.papers)})"
-    doc = Document(
-        filename=batch_name,
-        source="huggingface-selected",
-        status="processing"
-    )
-    db.add(doc)
+    # Create separate records for each paper
+    doc_tasks = []
+    for p in body.papers:
+        doc = Document(
+            filename=p.title,
+            source=p.url or p.title,
+            status="processing"
+        )
+        db.add(doc)
+        doc_tasks.append((doc, p.dict()))
+    
     await db.commit()
-    await db.refresh(doc)
+    
+    # After commit, docs have IDs
+    tasks_info = [(d.id, p_dict) for d, p_dict in doc_tasks]
 
-    async def run_selective_ingest(doc_id: int, papers_to_ingest: list[dict]):
+    async def run_individual_ingest(task_list: list[tuple[int, dict]]):
+        import httpx
         from app.database import async_session_factory
-        async with async_session_factory() as session:
-            try:
-                total = 0
-                for p in papers_to_ingest:
-                    text = f"Title: {p['title']}\n\nAbstract: {p['abstract']}"
-                    if p.get("author"):
-                        text += f"\n\nAuthor: {p['author']}"
-                    if p.get("published"):
-                        text += f"\nPublished: {p['published']}"
-                    source = p.get("url") or p["title"]
-                    total += ingest_text_chunks(source, [text], document_id=doc_id)
-                
-                db_doc = await session.get(Document, doc_id)
-                if db_doc:
-                    db_doc.status = "indexed"
-                    db_doc.chunks_count = total
-                    await session.commit()
-            except Exception as e:
-                db_doc = await session.get(Document, doc_id)
-                if db_doc:
-                    db_doc.status = "failed"
-                    db_doc.error_message = str(e)
-                    await session.commit()
+        from app.ingestion.pipeline import ingest_document
 
-    background_tasks.add_task(run_selective_ingest, doc.id, [p.dict() for p in body.papers])
+        async with httpx.AsyncClient(follow_redirects=True, timeout=60.0) as client:
+            for doc_id, p in task_list:
+                async with async_session_factory() as session:
+                    try:
+                        pdf_content = None
+                        filename = f"{p['title']}.pdf"
+                        
+                        # Try to get full PDF if arXiv URL is available
+                        arxiv_url = p.get("arxiv_url")
+                        if arxiv_url and "arxiv.org/abs/" in arxiv_url:
+                            pdf_url = arxiv_url.replace("/abs/", "/pdf/") + ".pdf"
+                            try:
+                                resp = await client.get(pdf_url)
+                                if resp.status_code == 200:
+                                    pdf_content = resp.content
+                            except Exception as download_err:
+                                print(f"Failed to download PDF for {p['title']}: {download_err}")
+
+                        if pdf_content:
+                            # Ingest as full document (PDF)
+                            count = ingest_document(filename, pdf_content, document_id=doc_id)
+                        else:
+                            # Fallback: Ingest abstract only as text
+                            text = f"Title: {p['title']}\n\nAbstract: {p['abstract']}"
+                            if p.get("author"):
+                                text += f"\n\nAuthor: {p['author']}"
+                            if p.get("published"):
+                                text += f"\nPublished: {p['published']}"
+                            
+                            source = p.get("url") or p["title"]
+                            count = ingest_text_chunks(source, [text], document_id=doc_id)
+                        
+                        db_doc = await session.get(Document, doc_id)
+                        if db_doc:
+                            db_doc.status = "indexed"
+                            db_doc.chunks_count = count
+                            await session.commit()
+                    except Exception as e:
+                        db_doc = await session.get(Document, doc_id)
+                        if db_doc:
+                            db_doc.status = "failed"
+                            db_doc.error_message = str(e)
+                            await session.commit()
+
+    background_tasks.add_task(run_individual_ingest, tasks_info)
 
     return DocumentUploadResponse(
-        message=f"Ingestion started for {len(body.papers)} selected papers.",
+        message=f"Ingestion started for {len(body.papers)} selected papers. Full PDFs will be downloaded where possible.",
         chunks_indexed=0,
     )
 

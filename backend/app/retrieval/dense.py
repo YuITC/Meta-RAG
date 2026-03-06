@@ -97,7 +97,7 @@ def dense_search(query: str, top_k: int = 5, document_ids: list[int] | None = No
         collection_name=settings.qdrant_collection,
         query=q_vec,
         limit=top_k,
-        filter=search_filter,
+        query_filter=search_filter,
         with_payload=True,
     )
     return [

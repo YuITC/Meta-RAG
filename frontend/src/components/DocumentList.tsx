@@ -7,6 +7,7 @@ import {
   deleteDocument,
   wipeAllDocuments,
 } from "@/lib/api";
+import { toast } from "./Toast";
 
 export default function DocumentList({
   refreshTicker,
@@ -43,8 +44,9 @@ export default function DocumentList({
     try {
       await deleteDocument(docId);
       setDocuments(documents.filter((d) => d.id !== docId));
+      toast.success(`Deleted "${filename}"`);
     } catch (err) {
-      alert("Failed to delete document");
+      toast.error("Failed to delete document");
     } finally {
       setDeletingId(null);
     }
@@ -62,8 +64,9 @@ export default function DocumentList({
     try {
       await wipeAllDocuments();
       setDocuments([]);
+      toast.success("All data has been wiped.");
     } catch (err) {
-      alert("Failed to wipe documents");
+      toast.error("Failed to wipe documents");
     } finally {
       setIsWiping(false);
     }
@@ -215,6 +218,9 @@ export default function DocumentList({
           display: flex;
           flex-direction: column;
           gap: 8px;
+          max-height: 400px;
+          overflow-y: auto;
+          padding-right: 4px;
         }
         .document-card {
           border: 1px solid var(--border);

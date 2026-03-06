@@ -25,10 +25,11 @@ Source documents:
 
 Instructions:
 - Write a clear, structured Markdown response
-- Cite sources inline using [1], [2], etc. notation corresponding to document numbers
+- ALWAYS cite sources inline using [1], [2], etc. notation whenever you use information from a document.
+- Inline citations are MANDATORY for every factual claim.
 - Be concise but thorough
 - Do not add information not present in the documents
-- Include a References section at the end listing the cited sources
+- IMPORTANT: DO NOT include a "References" or "Sources" section at the end. I will handle the list separately.
 
 Answer:"""
 

@@ -28,16 +28,64 @@ function MetricBar({
   const pct = Math.min(100, (value / max) * 100);
   return (
     <div className="metric-row">
-      <span className="metric-label">{label}</span>
-      <div className="metric-bar-track">
-        <div
-          className="metric-bar-fill"
-          style={{ width: `${pct}%`, background: color }}
-        />
+      <div className="metric-info">
+        <span className="metric-label">{label}</span>
+        <span className="metric-value">
+          {typeof value === "number" ? value.toFixed(3) : value}
+        </span>
       </div>
-      <span className="metric-value">
-        {typeof value === "number" ? value.toFixed(3) : value}
-      </span>
+      <div className="metric-bar-container">
+        <div className="metric-bar-track">
+          <div
+            className="metric-bar-fill"
+            style={{
+              width: `${pct}%`,
+              background: color,
+              boxShadow: `0 0 10px ${color}44`,
+            }}
+          />
+        </div>
+      </div>
+      <style jsx>{`
+        .metric-row {
+          display: flex;
+          flex-direction: column;
+          gap: 6px;
+          padding: 8px 0;
+        }
+        .metric-info {
+          display: flex;
+          justify-content: space-between;
+          align-items: baseline;
+        }
+        .metric-label {
+          font-size: 12px;
+          text-transform: uppercase;
+          letter-spacing: 0.05em;
+          color: var(--muted-fg);
+          font-weight: 500;
+        }
+        .metric-value {
+          font-family: var(--font-mono);
+          font-size: 13px;
+          color: var(--foreground);
+          font-weight: 600;
+        }
+        .metric-bar-container {
+          width: 100%;
+        }
+        .metric-bar-track {
+          height: 6px;
+          background: rgba(255, 255, 255, 0.05);
+          border-radius: 3px;
+          overflow: hidden;
+        }
+        .metric-bar-fill {
+          height: 100%;
+          border-radius: 3px;
+          transition: width 1s cubic-bezier(0.34, 1.56, 0.64, 1);
+        }
+      `}</style>
     </div>
   );
 }
@@ -53,12 +101,80 @@ function PipelineStage({
 }) {
   return (
     <div className="stage">
-      <div className="stage-dot" />
+      <div className="stage-visual">
+        <div className="stage-dot" />
+        <div className="stage-line" />
+      </div>
       <div className="stage-body">
         <span className="stage-step">{step}</span>
         <span className="stage-label">{label}</span>
         {detail && <span className="stage-detail">{detail}</span>}
       </div>
+      <style jsx>{`
+        .stage {
+          display: flex;
+          gap: 16px;
+          min-height: 40px;
+        }
+        .stage-visual {
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          width: 12px;
+          position: relative;
+        }
+        .stage-dot {
+          width: 8px;
+          height: 8px;
+          border-radius: 50%;
+          background: var(--accent);
+          flex-shrink: 0;
+          margin-top: 6px;
+          z-index: 2;
+          box-shadow: 0 0 8px var(--accent);
+        }
+        .stage-line {
+          width: 1px;
+          background: var(--border);
+          flex-grow: 1;
+          margin: 4px 0;
+        }
+        .stage:last-child .stage-line {
+          display: none;
+        }
+        .stage-body {
+          display: flex;
+          flex-direction: row;
+          align-items: baseline;
+          gap: 12px;
+          padding-bottom: 20px;
+          flex: 1;
+        }
+        .stage:last-child .stage-body {
+          padding-bottom: 0;
+        }
+        .stage-step {
+          font-family: var(--font-mono);
+          font-size: 11px;
+          color: var(--muted-fg);
+          opacity: 0.7;
+          min-width: 20px;
+        }
+        .stage-label {
+          font-size: 14px;
+          font-weight: 500;
+          color: var(--foreground);
+          min-width: 80px;
+        }
+        .stage-detail {
+          font-size: 12px;
+          color: var(--muted-fg);
+          font-family: var(--font-mono);
+          background: rgba(255, 255, 255, 0.03);
+          padding: 2px 8px;
+          border-radius: 4px;
+        }
+      `}</style>
     </div>
   );
 }
@@ -198,96 +314,93 @@ export default function ResultDisplay({ result, query }: ResultDisplayProps) {
         .pipeline {
           display: flex;
           flex-direction: column;
-          padding: 12px 16px;
-          gap: 0;
+          padding: 16px;
         }
         .stage {
           display: flex;
-          align-items: flex-start;
-          gap: 12px;
-          position: relative;
-          padding-bottom: 12px;
+          gap: 16px;
+          min-height: 40px;
         }
-        .stage:last-child {
-          padding-bottom: 0;
+        .stage-visual {
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          width: 12px;
+          position: relative;
         }
         .stage-dot {
           width: 8px;
           height: 8px;
           border-radius: 50%;
           background: var(--accent);
-          margin-top: 5px;
           flex-shrink: 0;
-          position: relative;
-          z-index: 1;
+          margin-top: 6px;
+          z-index: 2;
+          box-shadow: 0 0 8px var(--accent);
         }
-        .stage:not(:last-child) .stage-dot::after {
-          content: "";
-          position: absolute;
-          left: 3px;
-          top: 10px;
-          width: 2px;
-          height: calc(100% + 4px);
+        .stage-line {
+          width: 1px;
           background: var(--border);
+          flex-grow: 1;
+          margin: 4px 0;
+        }
+        .stage:last-child .stage-line {
+          display: none;
         }
         .stage-body {
           display: flex;
           flex-direction: row;
-          gap: 10px;
           align-items: baseline;
+          gap: 12px;
+          padding-bottom: 20px;
+          flex: 1;
+        }
+        .stage:last-child .stage-body {
+          padding-bottom: 0;
         }
         .stage-step {
-          color: var(--muted-fg);
+          font-family: var(--font-mono);
           font-size: 11px;
+          color: var(--muted-fg);
+          opacity: 0.7;
+          min-width: 20px;
         }
         .stage-label {
-          font-size: 13px;
+          font-size: 14px;
+          font-weight: 500;
           color: var(--foreground);
+          min-width: 80px;
         }
         .stage-detail {
           font-size: 12px;
           color: var(--muted-fg);
+          font-family: var(--font-mono);
+          background: rgba(255, 255, 255, 0.03);
+          padding: 2px 8px;
+          border-radius: 4px;
         }
         /* Metrics */
         .metrics-grid {
-          padding: 12px 16px;
-          display: flex;
-          flex-direction: column;
-          gap: 8px;
-        }
-        .metric-row {
-          display: flex;
-          align-items: center;
-          gap: 10px;
-        }
-        .metric-label {
-          width: 90px;
-          font-size: 12px;
-          color: var(--muted-fg);
-          flex-shrink: 0;
-        }
-        .metric-bar-track {
-          flex: 1;
-          height: 4px;
-          background: var(--border);
-          border-radius: 2px;
-          overflow: hidden;
-        }
-        .metric-bar-fill {
-          height: 100%;
-          border-radius: 2px;
-          transition: width 0.6s ease;
-        }
-        .metric-value {
-          width: 60px;
-          text-align: right;
-          font-size: 12px;
-          color: var(--foreground);
+          padding: 20px 16px;
+          display: grid;
+          grid-template-columns: 1fr 1fr;
+          gap: 24px;
         }
         .metrics-raw {
-          padding: 6px 16px 12px;
+          padding: 12px 16px;
+          border-top: 1px solid var(--border);
           font-size: 11px;
           color: var(--muted-fg);
+          font-family: var(--font-mono);
+          display: flex;
+          gap: 16px;
+          background: rgba(255, 255, 255, 0.01);
+        }
+        @media (max-width: 640px) {
+          .metrics-grid {
+            grid-template-columns: 1fr;
+            gap: 12px;
+          }
         }
         /* Answer */
         .answer-body {

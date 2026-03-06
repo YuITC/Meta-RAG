@@ -23,4 +23,4 @@ def rerank(query: str, docs: list[dict], top_k: int | None = None) -> list[dict]
 
     ranked = sorted(zip(docs, scores), key=lambda x: x[1], reverse=True)
     limit = top_k if top_k is not None else len(docs)
-    return [dict(**doc, score=float(score)) for doc, score in ranked[:limit]]
+    return [{**doc, "score": float(score)} for doc, score in ranked[:limit]]
