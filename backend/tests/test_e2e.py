@@ -1,113 +1,134 @@
-"""Integration tests for the end-to-end query pipeline."""
-import os
+"""
+End-to-end integration tests.
+These require a running Qdrant instance; they are skipped otherwise.
+"""
+
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
-from httpx import AsyncClient, ASGITransport
-
-# Skip integration tests if no API key is set
-SKIP_INTEGRATION = not os.getenv("GEMINI_API_KEY")
+import pytest_asyncio
 
 
-@pytest.fixture
-async def test_app():
-    """Create a test FastAPI app with mocked dependencies."""
-    from app.main import app
-    from app.api import routes
+# ──────────────────────────────────────────────────────────────────────────────
+# Fixtures
+# ──────────────────────────────────────────────────────────────────────────────
 
-    mock_agent = MagicMock()
-    mock_agent.run = AsyncMock(
-        return_value={
-            "query": "Why did Transformers replace RNNs?",
-            "answer": "Transformers replaced RNNs due to parallelization and attention [1].",
-            "citations": [{"doc_id": "d1", "title": "Attention is All You Need", "span": "attention mechanisms", "score": 0.9}],
-            "query_type": "factual",
-            "config_id": "A",
-            "faithfulness": 0.85,
-            "citation_grounding": 0.80,
-            "utility": 0.72,
-            "cost": 0.00012,
-            "latency": 4.2,
-            "retry_count": 0,
-        }
-    )
-    mock_agent.bandit = MagicMock()
-    mock_agent.bandit.get_arm_stats = MagicMock(
-        return_value={
-            "A": {"count": 1, "mean_reward": 0.72, "ucb1_score": 1.5, "top_k": 5, "chunk_size": 200, "rerank": False},
-            "B": {"count": 0, "mean_reward": 0.0, "ucb1_score": float("inf"), "top_k": 8, "chunk_size": 300, "rerank": False},
-            "C": {"count": 0, "mean_reward": 0.0, "ucb1_score": float("inf"), "top_k": 8, "chunk_size": 300, "rerank": True},
-        }
-    )
+@pytest.fixture(scope="session")
+def qdrant_available():
+    """Check if Qdrant is reachable; skip tests if not."""
+    try:
+        from qdrant_client import QdrantClient
+        client = QdrantClient(host="localhost", port=6333, timeout=2)
+        client.get_collections()
+        return True
+    except Exception:
+        pytest.skip("Qdrant not available — skipping e2e tests")
 
-    await routes.set_agent(mock_agent)
 
-    mock_session = AsyncMock()
-    mock_session.__aenter__ = AsyncMock(return_value=mock_session)
-    mock_session.__aexit__ = AsyncMock(return_value=False)
-    mock_session.add = MagicMock()
-    mock_session.commit = AsyncMock()
-    mock_session.scalar = AsyncMock(return_value=1)
-    mock_session.execute = AsyncMock(return_value=AsyncMock(scalar_one_or_none=lambda: None))
+@pytest.fixture(scope="session")
+def test_collection(qdrant_available):
+    """Create a temporary test collection and tear it down after."""
+    from qdrant_client import QdrantClient
+    from qdrant_client.models import Distance, VectorParams
 
-    # Mock async_session_factory used by the background _log() task
-    mock_sf = MagicMock()
-    mock_sf.return_value.__aenter__ = AsyncMock(return_value=mock_session)
-    mock_sf.return_value.__aexit__ = AsyncMock(return_value=False)
+    client = QdrantClient(host="localhost", port=6333)
+    col = "test_ara_e2e"
+    # Ensure clean state
+    try:
+        client.delete_collection(col)
+    except Exception:
+        pass
+    client.create_collection(col, vectors_config=VectorParams(size=384, distance=Distance.COSINE))
+    yield col
+    client.delete_collection(col)
 
-    with patch("app.api.routes.get_session", return_value=mock_session), \
-         patch("app.api.routes.async_session_factory", mock_sf):
-        yield app
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Ingestion + retrieval round-trip
+# ──────────────────────────────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_ingest_and_dense_search(test_collection, monkeypatch):
+    import app.config as cfg_mod
+    import app.retrieval.dense as dense_mod
+
+    monkeypatch.setattr(cfg_mod.settings, "qdrant_collection", test_collection)
+    # Reset cached client/embedder to pick up monkeypatched collection name
+    monkeypatch.setattr(dense_mod, "_client", None)
+
+    chunks = [
+        {"text": "Transformers use self-attention mechanisms.", "source": "paper1.pdf", "chunk_index": 0},
+        {"text": "BERT is a bidirectional encoder representation.", "source": "paper2.pdf", "chunk_index": 0},
+    ]
+    dense_mod.upsert_chunks(chunks)
+
+    results = dense_mod.dense_search("self-attention transformer", top_k=2)
+    assert len(results) >= 1
+    assert any("Transformer" in r["text"] or "attention" in r["text"].lower() for r in results)
 
 
 @pytest.mark.asyncio
-async def test_health_endpoint(test_app):
-    async with AsyncClient(transport=ASGITransport(app=test_app), base_url="http://test") as client:
-        resp = await client.get("/api/v1/health")
-    assert resp.status_code == 200
-    assert resp.json() == {"status": "ok"}
+async def test_hybrid_search_returns_results(test_collection, monkeypatch):
+    import app.config as cfg_mod
+    import app.retrieval.dense as dense_mod
+    import app.retrieval.bm25_retrieval as bm25_mod
+
+    monkeypatch.setattr(cfg_mod.settings, "qdrant_collection", test_collection)
+    monkeypatch.setattr(dense_mod, "_client", None)
+    monkeypatch.setattr(bm25_mod, "_bm25", None)
+    monkeypatch.setattr(bm25_mod, "_corpus", None)
+
+    from app.retrieval.hybrid import hybrid_search
+    results = hybrid_search("BERT encoder", top_k=5)
+    assert isinstance(results, list)
 
 
-@pytest.mark.asyncio
-async def test_query_endpoint_returns_structured_response(test_app):
-    async with AsyncClient(transport=ASGITransport(app=test_app), base_url="http://test") as client:
-        resp = await client.post(
-            "/api/v1/query",
-            json={"query": "Why did Transformers replace RNNs?"},
-        )
-    assert resp.status_code == 200
-    data = resp.json()
-    assert "answer" in data
-    assert "citations" in data
-    assert "faithfulness" in data
-    assert "utility" in data
-    assert "latency" in data
-    assert "cost" in data
-    assert data["config_id"] in ("A", "B", "C")
+# ──────────────────────────────────────────────────────────────────────────────
+# Planner
+# ──────────────────────────────────────────────────────────────────────────────
+
+def test_rule_based_classifier_factual():
+    from app.agent.planner import classify_rule_based
+    assert classify_rule_based("What is the learning rate used?") == "factual"
 
 
-@pytest.mark.asyncio
-async def test_query_rejects_empty_string(test_app):
-    async with AsyncClient(transport=ASGITransport(app=test_app), base_url="http://test") as client:
-        resp = await client.post("/api/v1/query", json={"query": ""})
-    assert resp.status_code == 422
+def test_rule_based_classifier_comparative():
+    from app.agent.planner import classify_rule_based
+    assert classify_rule_based("Compare BERT vs GPT") == "comparative"
 
 
-@pytest.mark.asyncio
-async def test_ingestion_pipeline_unit():
-    """Unit test ingestion without Qdrant/BM25 side effects."""
-    from app.ingestion.pipeline import _chunk_text, _hierarchical_chunks
+def test_rule_based_classifier_multi_hop():
+    from app.agent.planner import classify_rule_based
+    assert classify_rule_based("Why does attention help in NLP?") == "multi_hop"
 
-    # chunk_text basic
-    text = "word " * 100
-    chunks = _chunk_text(text, chunk_size=50, overlap=10)
-    assert len(chunks) > 1
-    for c in chunks:
-        assert len(c) <= 60  # chunk_size + small buffer
 
-    # hierarchical_chunks
-    md = "# Section 1\n\nFirst paragraph text here.\n\n## Section 2\n\nSecond paragraph text."
-    chunks = _hierarchical_chunks(md, chunk_size=200, overlap=20)
+# ──────────────────────────────────────────────────────────────────────────────
+# Ingestion pipeline
+# ──────────────────────────────────────────────────────────────────────────────
+
+def test_parse_txt():
+    from app.ingestion.pipeline import parse_document
+    content = b"Hello world. This is a test document."
+    text = parse_document("test.txt", content)
+    assert "Hello world" in text
+
+
+def test_parse_markdown():
+    from app.ingestion.pipeline import parse_document
+    content = b"# Title\n\nSome **bold** content here."
+    text = parse_document("test.md", content)
+    assert "Title" in text
+    assert "bold" in text
+
+
+def test_chunk_text_overlap():
+    from app.ingestion.pipeline import _chunk_text
+    text = "a" * 1200
+    chunks = _chunk_text(text, chunk_size=512, overlap=64)
     assert len(chunks) >= 2
-    for c in chunks:
-        assert "text" in c
-        assert "section" in c
+    # Check overlap: end of chunk 0 should appear at start of chunk 1
+    assert chunks[0][-64:] == chunks[1][:64]
+
+
+def test_chunk_text_empty():
+    from app.ingestion.pipeline import _chunk_text
+    assert _chunk_text("") == []
+    assert _chunk_text("   ") == []

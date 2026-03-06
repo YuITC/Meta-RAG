@@ -1,101 +1,99 @@
-import asyncio
-from functools import lru_cache
+import hashlib
 
-import numpy as np
-from qdrant_client import AsyncQdrantClient
-from qdrant_client.models import Distance, VectorParams, PointStruct
+from qdrant_client import QdrantClient
+from qdrant_client.models import Distance, PointStruct, VectorParams
 from sentence_transformers import SentenceTransformer
 
 from app.config import settings
 
+_client: QdrantClient | None = None
+_embedder: SentenceTransformer | None = None
 
-@lru_cache(maxsize=1)
+EMBEDDING_DIM = 384  # bge-small-en-v1.5
+
+
+def get_qdrant_client() -> QdrantClient:
+    global _client
+    if _client is None:
+        _client = QdrantClient(host=settings.qdrant_host, port=settings.qdrant_port)
+    return _client
+
+
 def get_embedder() -> SentenceTransformer:
-    return SentenceTransformer(settings.embedding_model)
+    global _embedder
+    if _embedder is None:
+        _embedder = SentenceTransformer(settings.embedding_model)
+    return _embedder
 
 
-def embed_text(text: str) -> list[float]:
-    embedder = get_embedder()
-    vec = embedder.encode(text, normalize_embeddings=True)
-    return vec.tolist()
+def embed(texts: list[str]) -> list[list[float]]:
+    return get_embedder().encode(texts, normalize_embeddings=True).tolist()
 
 
-def embed_texts(texts: list[str]) -> list[list[float]]:
-    embedder = get_embedder()
-    vecs = embedder.encode(texts, normalize_embeddings=True, batch_size=32)
-    return vecs.tolist()
-
-
-class DenseRetriever:
-    def __init__(self):
-        self.client = AsyncQdrantClient(
-            host=settings.qdrant_host, port=settings.qdrant_port
+def ensure_collection() -> None:
+    client = get_qdrant_client()
+    existing = {c.name for c in client.get_collections().collections}
+    if settings.qdrant_collection not in existing:
+        client.create_collection(
+            settings.qdrant_collection,
+            vectors_config=VectorParams(size=EMBEDDING_DIM, distance=Distance.COSINE),
         )
-        self.collection = settings.qdrant_collection
-        self._initialized = False
 
-    async def ensure_collection(self) -> None:
-        if self._initialized:
-            return
-        embedder = get_embedder()
-        dim = embedder.get_sentence_embedding_dimension()
-        collections = await self.client.get_collections()
-        names = [c.name for c in collections.collections]
-        if self.collection not in names:
-            await self.client.create_collection(
-                self.collection,
-                vectors_config=VectorParams(size=dim, distance=Distance.COSINE),
-            )
-        self._initialized = True
 
-    async def upsert(self, points: list[dict]) -> None:
-        """points: list of {id, vector, payload}"""
-        await self.ensure_collection()
-        structs = [
-            PointStruct(id=p["id"], vector=p["vector"], payload=p["payload"])
-            for p in points
-        ]
-        await self.client.upsert(self.collection, points=structs)
+def text_to_id(text: str, source: str) -> int:
+    """Deterministic integer ID from text content."""
+    h = hashlib.md5(f"{source}::{text[:200]}".encode()).hexdigest()
+    return int(h[:15], 16)
 
-    async def search(self, query: str, top_k: int = 5) -> list[dict]:
-        await self.ensure_collection()
-        loop = asyncio.get_event_loop()
-        vec = await loop.run_in_executor(None, embed_text, query)
-        results = await self.client.search(
-            self.collection,
-            query_vector=vec,
-            limit=top_k,
-            with_payload=True,
+
+def upsert_chunks(chunks: list[dict]) -> None:
+    """
+    chunks: list of {"text": str, "source": str, "chunk_index": int}
+    """
+    ensure_collection()
+    client = get_qdrant_client()
+    vectors = embed([c["text"] for c in chunks])
+    points = [
+        PointStruct(
+            id=text_to_id(c["text"], c["source"]),
+            vector=v,
+            payload={
+                "text": c["text"],
+                "source": c["source"],
+                "chunk_index": c.get("chunk_index", 0),
+            },
         )
-        return [
-            {
-                "id": str(r.id),
-                "score": r.score,
-                "text": r.payload.get("text", ""),
-                "title": r.payload.get("title", ""),
-                "source": r.payload.get("source", ""),
-                "chunk_index": r.payload.get("chunk_index", 0),
-            }
-            for r in results
-        ]
+        for c, v in zip(chunks, vectors)
+    ]
+    # Upsert in batches of 100
+    for i in range(0, len(points), 100):
+        client.upsert(
+            collection_name=settings.qdrant_collection, points=points[i : i + 100]
+        )
 
-    async def get_all_texts(self) -> tuple[list[str], list[str]]:
-        """Return (ids, texts) for BM25 index building."""
-        await self.ensure_collection()
-        ids, texts = [], []
-        offset = None
-        while True:
-            records, next_offset = await self.client.scroll(
-                self.collection,
-                limit=100,
-                offset=offset,
-                with_payload=True,
-                with_vectors=False,
-            )
-            for r in records:
-                ids.append(str(r.id))
-                texts.append(r.payload.get("text", ""))
-            if next_offset is None:
-                break
-            offset = next_offset
-        return ids, texts
+
+def dense_search(query: str, top_k: int = 5) -> list[dict]:
+    ensure_collection()
+    client = get_qdrant_client()
+    q_vec = embed([query])[0]
+    response = client.query_points(
+        collection_name=settings.qdrant_collection,
+        query=q_vec,
+        limit=top_k,
+        with_payload=True,
+    )
+    return [
+        {
+            "id": r.id,
+            "text": r.payload["text"],
+            "source": r.payload["source"],
+            "score": r.score,
+        }
+        for r in response.points
+    ]
+
+
+def collection_count() -> int:
+    ensure_collection()
+    client = get_qdrant_client()
+    return client.count(collection_name=settings.qdrant_collection).count

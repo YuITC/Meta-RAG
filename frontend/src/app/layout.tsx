@@ -3,10 +3,14 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: "Autonomous Research Agent",
-  description: "RAG system with adaptive retrieval optimization",
+  description: "Self-optimizing RAG pipeline with Thompson Sampling",
 };
 
-export default function RootLayout({ children }: { children: React.ReactNode }) {
+export default function RootLayout({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
   return (
     <html lang="en">
       <body>{children}</body>

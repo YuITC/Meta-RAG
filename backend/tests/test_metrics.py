@@ -1,76 +1,135 @@
-"""Unit tests for metric computation and bandit optimizer."""
-import math
+"""Unit tests for the optimization layer (bandit + utility)."""
+
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
-
-from app.optimization.bandit import BanditOptimizer
-from app.config import RETRIEVAL_CONFIGS
+import numpy as np
 
 
-class TestBanditOptimizer:
-    def _make_bandit(self):
-        bandit = BanditOptimizer()
-        bandit._memory.get_best_config = AsyncMock(return_value=None)
-        return bandit
+# ──────────────────────────────────────────────────────────────────────────────
+# Utility function
+# ──────────────────────────────────────────────────────────────────────────────
 
-    def test_ucb1_score_infinite_for_unplayed_arm(self):
-        bandit = self._make_bandit()
-        score = bandit._ucb1_score("A")
-        assert score == float("inf")
+def test_compute_utility_perfect():
+    from app.optimization.bandit import compute_utility
 
-    def test_ucb1_score_finite_after_update(self):
-        bandit = self._make_bandit()
-        bandit._arms["A"]["count"] = 3
-        bandit._arms["A"]["total_reward"] = 2.1
-        bandit._total_pulls = 5
-        score = bandit._ucb1_score("A")
-        expected_mean = 2.1 / 3
-        expected_exploration = math.sqrt(2 * math.log(5) / 3)
-        assert abs(score - (expected_mean + expected_exploration)) < 1e-9
+    # High faithfulness, zero cost/latency → close to 1.0
+    u = compute_utility(1.0, 0.0, 0.0)
+    assert u == 1.0
 
-    @pytest.mark.asyncio
-    async def test_select_config_returns_valid_config(self):
-        bandit = self._make_bandit()
-        config_id = await bandit.select_config("test query")
-        assert config_id in RETRIEVAL_CONFIGS
 
-    def test_select_different_config(self):
-        bandit = self._make_bandit()
-        bandit._arms["A"]["count"] = 5
-        bandit._arms["A"]["total_reward"] = 2.0
-        bandit._arms["B"]["count"] = 3
-        bandit._arms["B"]["total_reward"] = 1.5
-        bandit._arms["C"]["count"] = 2
-        bandit._arms["C"]["total_reward"] = 1.0
-        bandit._total_pulls = 10
+def test_compute_utility_penalizes_cost():
+    from app.optimization.bandit import compute_utility
 
-        alt = bandit.select_different_config("A")
-        assert alt != "A"
-        assert alt in RETRIEVAL_CONFIGS
+    u_cheap = compute_utility(0.8, 0.001, 5.0)
+    u_expensive = compute_utility(0.8, 0.005, 5.0)
+    assert u_cheap > u_expensive
 
-    @pytest.mark.asyncio
-    async def test_update_increments_count(self):
-        bandit = self._make_bandit()
-        # Patch DB write
-        with patch("app.optimization.bandit.async_session_factory") as mock_sf:
-            mock_session = AsyncMock()
-            mock_session.__aenter__ = AsyncMock(return_value=mock_session)
-            mock_session.__aexit__ = AsyncMock(return_value=False)
-            mock_session.execute = AsyncMock(return_value=AsyncMock(scalar_one_or_none=lambda: None))
-            mock_session.add = MagicMock()
-            mock_session.commit = AsyncMock()
-            mock_sf.return_value = mock_session
 
-            await bandit.update("A", 0.8)
-            assert bandit._arms["A"]["count"] == 1
-            assert abs(bandit._arms["A"]["total_reward"] - 0.8) < 1e-9
-            assert bandit._total_pulls == 1
+def test_compute_utility_penalizes_latency():
+    from app.optimization.bandit import compute_utility
 
-    def test_get_arm_stats_has_all_configs(self):
-        bandit = self._make_bandit()
-        stats = bandit.get_arm_stats()
-        assert set(stats.keys()) == set(RETRIEVAL_CONFIGS.keys())
-        for cid, info in stats.items():
-            assert "count" in info
-            assert "mean_reward" in info
-            assert "top_k" in info
+    u_fast = compute_utility(0.8, 0.001, 3.0)
+    u_slow = compute_utility(0.8, 0.001, 15.0)
+    assert u_fast > u_slow
+
+
+def test_compute_utility_clamped():
+    from app.optimization.bandit import compute_utility
+
+    # Should not go below 0
+    u = compute_utility(0.0, 0.1, 100.0)
+    assert u == 0.0
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Thompson Sampling Bandit
+# ──────────────────────────────────────────────────────────────────────────────
+
+def test_bandit_initial_priors():
+    from app.optimization.bandit import ThompsonSamplingBandit
+
+    bandit = ThompsonSamplingBandit()
+    for c in ["A", "B", "C"]:
+        assert bandit.alpha[c] == 1.0
+        assert bandit.beta[c] == 1.0
+
+
+def test_bandit_update_success():
+    from app.optimization.bandit import ThompsonSamplingBandit
+
+    bandit = ThompsonSamplingBandit()
+    bandit.update("A", utility=0.8)  # above threshold
+    assert bandit.alpha["A"] == 2.0
+    assert bandit.beta["A"] == 1.0
+
+
+def test_bandit_update_failure():
+    from app.optimization.bandit import ThompsonSamplingBandit
+
+    bandit = ThompsonSamplingBandit()
+    bandit.update("B", utility=0.3)  # below threshold
+    assert bandit.alpha["B"] == 1.0
+    assert bandit.beta["B"] == 2.0
+
+
+def test_bandit_select_excludes():
+    from app.optimization.bandit import ThompsonSamplingBandit
+
+    np.random.seed(42)
+    bandit = ThompsonSamplingBandit()
+    for _ in range(20):
+        selected = bandit.select_config(exclude="A")
+        assert selected != "A"
+
+
+def test_bandit_stats_win_rate():
+    from app.optimization.bandit import ThompsonSamplingBandit
+
+    bandit = ThompsonSamplingBandit()
+    # 3 wins, 1 loss for config A
+    for _ in range(3):
+        bandit.update("A", 0.9)
+    bandit.update("A", 0.1)
+
+    stats = bandit.stats()
+    # alpha=4, beta=2 → win_rate = 4/6 ≈ 0.667
+    assert abs(stats["A"]["win_rate"] - 4 / 6) < 0.01
+    assert stats["A"]["trials"] == 4
+
+
+def test_bandit_converges_to_better_config():
+    """After many updates, bandit should prefer config with higher win rate."""
+    from app.optimization.bandit import ThompsonSamplingBandit
+
+    np.random.seed(0)
+    bandit = ThompsonSamplingBandit()
+
+    # Config A always succeeds, C always fails
+    for _ in range(20):
+        bandit.update("A", 0.9)
+        bandit.update("C", 0.2)
+
+    counts = {"A": 0, "B": 0, "C": 0}
+    for _ in range(100):
+        counts[bandit.select_config()] += 1
+
+    # A should be selected most often
+    assert counts["A"] > counts["C"]
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Cost estimation
+# ──────────────────────────────────────────────────────────────────────────────
+
+def test_estimate_cost_positive():
+    from app.optimization.bandit import estimate_cost
+
+    cost = estimate_cost(1000, 200)
+    assert cost > 0
+
+
+def test_estimate_cost_scales_with_tokens():
+    from app.optimization.bandit import estimate_cost
+
+    c1 = estimate_cost(1000, 100)
+    c2 = estimate_cost(10000, 1000)
+    assert c2 > c1

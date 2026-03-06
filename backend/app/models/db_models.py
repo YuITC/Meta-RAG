@@ -1,40 +1,34 @@
-from datetime import datetime, timezone
-from sqlalchemy import Column, String, Float, Integer, DateTime, JSON, Text
+from datetime import datetime
+
+from sqlalchemy import Boolean, DateTime, Float, Integer, String
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.orm import Mapped, mapped_column
+
 from app.database import Base
 
 
-class QueryLog(Base):
-    __tablename__ = "query_logs"
+class RunLog(Base):
+    __tablename__ = "run_logs"
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    query = Column(Text, nullable=False)
-    query_type = Column(String(50))
-    config_id = Column(String(10))
-    faithfulness = Column(Float)
-    citation_grounding = Column(Float)
-    utility = Column(Float)
-    cost = Column(Float)
-    latency = Column(Float)
-    answer = Column(Text)
-    retry_count = Column(Integer, default=0)
-    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    query: Mapped[str] = mapped_column(String)
+    query_type: Mapped[str] = mapped_column(String)
+    config_name: Mapped[str] = mapped_column(String)
+    faithfulness: Mapped[float] = mapped_column(Float)
+    cost: Mapped[float] = mapped_column(Float)
+    latency: Mapped[float] = mapped_column(Float)
+    utility: Mapped[float] = mapped_column(Float)
+    is_retry: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
-class BanditArm(Base):
-    __tablename__ = "bandit_arms"
+class BanditState(Base):
+    __tablename__ = "bandit_states"
 
-    config_id = Column(String(10), primary_key=True)
-    count = Column(Integer, default=0)
-    total_reward = Column(Float, default=0.0)
-    updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
-
-
-class StrategyMemory(Base):
-    __tablename__ = "strategy_memory"
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    query_embedding = Column(JSON, nullable=False)  # list[float]
-    config_id = Column(String(10), nullable=False)
-    utility = Column(Float, nullable=False)
-    query_type = Column(String(50))
-    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    query_type: Mapped[str] = mapped_column(String, unique=True, index=True)
+    alpha: Mapped[dict] = mapped_column(JSONB)
+    beta: Mapped[dict] = mapped_column(JSONB)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )

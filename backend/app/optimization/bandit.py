@@ -1,109 +1,72 @@
-import math
-import random
-from datetime import datetime, timezone
+import numpy as np
+from dataclasses import dataclass, field
 
-from sqlalchemy import select, update
-from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+# Three retrieval configurations
+CONFIGS: dict[str, dict] = {
+    "A": {"top_k": 5, "chunk_size": 256, "rerank": False},
+    "B": {"top_k": 10, "chunk_size": 512, "rerank": False},
+    "C": {"top_k": 10, "chunk_size": 512, "rerank": True},
+}
 
-from app.config import RETRIEVAL_CONFIGS
-from app.database import async_session_factory
-from app.models.db_models import BanditArm
-from app.memory.strategy_memory import StrategyMemory
+CONFIG_NAMES = list(CONFIGS.keys())
 
 
-class BanditOptimizer:
-    """UCB1 multi-armed bandit for retrieval config selection."""
+@dataclass
+class ThompsonSamplingBandit:
+    """Thompson Sampling bandit with Beta(1,1) priors over retrieval configs."""
 
-    def __init__(self):
-        self._arms: dict[str, dict] = {
-            config_id: {"count": 0, "total_reward": 0.0}
-            for config_id in RETRIEVAL_CONFIGS
+    alpha: dict[str, float] = field(default_factory=lambda: {c: 1.0 for c in CONFIG_NAMES})
+    beta: dict[str, float] = field(default_factory=lambda: {c: 1.0 for c in CONFIG_NAMES})
+
+    def select_config(self, exclude: str | None = None) -> str:
+        candidates = [c for c in CONFIG_NAMES if c != exclude]
+        samples = {
+            c: float(np.random.beta(self.alpha[c], self.beta[c])) for c in candidates
         }
-        self._total_pulls: int = 0
-        self._memory = StrategyMemory()
+        return max(samples, key=samples.__getitem__)
 
-    async def initialize(self) -> None:
-        """Load arm state from DB."""
-        async with async_session_factory() as session:
-            for config_id in RETRIEVAL_CONFIGS:
-                result = await session.execute(
-                    select(BanditArm).where(BanditArm.config_id == config_id)
-                )
-                arm = result.scalar_one_or_none()
-                if arm:
-                    self._arms[config_id] = {
-                        "count": arm.count,
-                        "total_reward": arm.total_reward,
-                    }
-                    self._total_pulls += arm.count
-                else:
-                    # Insert default row
-                    session.add(BanditArm(config_id=config_id, count=0, total_reward=0.0))
-            await session.commit()
+    def update(self, config: str, utility: float, threshold: float = 0.7) -> None:
+        if utility >= threshold:
+            self.alpha[config] += 1.0
+        else:
+            self.beta[config] += 1.0
 
-    def _ucb1_score(self, config_id: str) -> float:
-        arm = self._arms[config_id]
-        if arm["count"] == 0:
-            return float("inf")
-        mean = arm["total_reward"] / arm["count"]
-        exploration = math.sqrt(2 * math.log(max(self._total_pulls, 1)) / arm["count"])
-        return mean + exploration
-
-    async def select_config(self, query: str) -> str:
-        """Select retrieval config using memory-aware UCB1."""
-        # Try memory lookup first
-        memory_config = await self._memory.get_best_config(query)
-        if memory_config:
-            return memory_config
-
-        # UCB1 selection
-        scores = {cid: self._ucb1_score(cid) for cid in RETRIEVAL_CONFIGS}
-        best = max(scores, key=scores.get)
-        return best
-
-    def select_different_config(self, current_config_id: str) -> str:
-        """Select a different config for retry (best UCB1 among others)."""
-        others = [cid for cid in RETRIEVAL_CONFIGS if cid != current_config_id]
-        if not others:
-            return current_config_id
-        scores = {cid: self._ucb1_score(cid) for cid in others}
-        return max(scores, key=scores.get)
-
-    async def update(self, config_id: str, reward: float) -> None:
-        """Update arm with observed reward and persist to DB."""
-        if config_id not in self._arms:
-            return
-        self._arms[config_id]["count"] += 1
-        self._arms[config_id]["total_reward"] += reward
-        self._total_pulls += 1
-
-        async with async_session_factory() as session:
-            result = await session.execute(
-                select(BanditArm).where(BanditArm.config_id == config_id)
-            )
-            arm = result.scalar_one_or_none()
-            if arm:
-                arm.count = self._arms[config_id]["count"]
-                arm.total_reward = self._arms[config_id]["total_reward"]
-                arm.updated_at = datetime.now(timezone.utc)
-            else:
-                session.add(
-                    BanditArm(
-                        config_id=config_id,
-                        count=self._arms[config_id]["count"],
-                        total_reward=self._arms[config_id]["total_reward"],
-                    )
-                )
-            await session.commit()
-
-    def get_arm_stats(self) -> dict:
-        stats = {}
-        for cid, arm in self._arms.items():
-            mean = arm["total_reward"] / arm["count"] if arm["count"] > 0 else 0.0
-            stats[cid] = {
-                "count": arm["count"],
-                "mean_reward": round(mean, 4),
-                "ucb1_score": round(self._ucb1_score(cid), 4),
-                **RETRIEVAL_CONFIGS[cid],
+    def stats(self) -> dict[str, dict]:
+        result = {}
+        for c in CONFIG_NAMES:
+            a, b = self.alpha[c], self.beta[c]
+            result[c] = {
+                "alpha": a,
+                "beta": b,
+                "win_rate": round(a / (a + b), 4),
+                "trials": int(a + b - 2),  # subtract Beta(1,1) prior
             }
-        return stats
+        return result
+
+
+def compute_utility(
+    faithfulness: float,
+    cost: float,
+    latency: float,
+    lambda1: float = 0.3,
+    lambda2: float = 0.2,
+) -> float:
+    """
+    Utility = Faithfulness - λ₁ × Cost_norm - λ₂ × Latency_norm
+    Cost_norm  = cost / 0.005
+    Latency_norm = latency / 15.0
+    """
+    cost_norm = cost / 0.005
+    latency_norm = latency / 15.0
+    utility = faithfulness - lambda1 * cost_norm - lambda2 * latency_norm
+    return round(max(0.0, min(1.0, utility)), 4)
+
+
+def estimate_cost(input_chars: int, output_chars: int) -> float:
+    """
+    Rough cost estimate using Gemini 2.5 Flash pricing.
+    ~4 chars per token. Input: $0.075/1M, Output: $0.30/1M tokens.
+    """
+    input_tokens = input_chars / 4
+    output_tokens = output_chars / 4
+    return input_tokens * 0.075 / 1_000_000 + output_tokens * 0.30 / 1_000_000

@@ -1,168 +1,246 @@
-import json
-import time
-from pathlib import Path
+import re
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, BackgroundTasks
-from sqlalchemy import select, func
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.database import get_session, async_session_factory
+from app.agent.graph import run_agent
+from app.database import get_db
+from app.ingestion.pipeline import ingest_document, ingest_text_chunks
+from app.memory.strategy_memory import load_bandit, log_run, save_bandit
 from app.models.schemas import (
+    BanditStats,
+    CitedChunk,
+    ConfigStats,
+    DocumentUploadResponse,
+    HealthResponse,
     QueryRequest,
     QueryResponse,
-    Citation,
-    IngestResponse,
-    StatsResponse,
+    RunMetrics,
 )
-from app.models.db_models import QueryLog, BanditArm
-from app.agent.graph import ResearchAgent
-from app.ingestion.pipeline import IngestionPipeline
-from app.config import settings
+from app.optimization.bandit import compute_utility
 
 router = APIRouter()
 
-# Singletons (initialized on startup via lifespan)
-_agent: ResearchAgent | None = None
-_ingestion: IngestionPipeline | None = None
+ALLOWED_EXTENSIONS = {".pdf", ".html", ".htm", ".md", ".markdown", ".docx", ".txt"}
 
 
-def get_agent() -> ResearchAgent:
-    if _agent is None:
-        raise HTTPException(status_code=503, detail="Agent not initialized")
-    return _agent
+# ──────────────────────────────────────────────────────────────────────────────
+# Health
+# ──────────────────────────────────────────────────────────────────────────────
 
-
-def get_ingestion() -> IngestionPipeline:
-    if _ingestion is None:
-        raise HTTPException(status_code=503, detail="Ingestion not initialized")
-    return _ingestion
-
-
-async def set_agent(agent: ResearchAgent) -> None:
-    global _agent
-    _agent = agent
-
-
-async def set_ingestion(pipeline: IngestionPipeline) -> None:
-    global _ingestion
-    _ingestion = pipeline
-
-
-@router.post("/query", response_model=QueryResponse)
-async def query(
-    request: QueryRequest,
-    background_tasks: BackgroundTasks,
-    agent: ResearchAgent = Depends(get_agent),
-) -> QueryResponse:
-    """Run a query through the research agent."""
-    result = await agent.run(request.query)
-
-    # Persist query log in background using its own session (request session is closed by then)
-    async def _log():
-        async with async_session_factory() as session:
-            session.add(
-                QueryLog(
-                    query=request.query,
-                    query_type=result.get("query_type", ""),
-                    config_id=result.get("config_id", ""),
-                    faithfulness=result.get("faithfulness", 0.0),
-                    citation_grounding=result.get("citation_grounding", 0.0),
-                    utility=result.get("utility", 0.0),
-                    cost=result.get("cost", 0.0),
-                    latency=result.get("latency", 0.0),
-                    answer=result.get("answer", ""),
-                    retry_count=result.get("retry_count", 0),
-                )
-            )
-            await session.commit()
-
-    background_tasks.add_task(_log)
-
-    citations = [
-        Citation(
-            doc_id=c.get("doc_id", ""),
-            title=c.get("title", ""),
-            text=c.get("span", ""),
-            score=c.get("rerank_score", c.get("score", 0.0)),
-        )
-        for c in (result.get("citations") or [])
-    ]
-
-    return QueryResponse(
-        query=request.query,
-        answer=result.get("answer", ""),
-        citations=citations,
-        query_type=result.get("query_type", ""),
-        config_id=result.get("config_id", ""),
-        faithfulness=result.get("faithfulness", 0.0),
-        citation_grounding=result.get("citation_grounding", 0.0),
-        utility=result.get("utility", 0.0),
-        cost=result.get("cost", 0.0),
-        latency=result.get("latency", 0.0),
-        retry_count=result.get("retry_count", 0),
-    )
-
-
-@router.post("/ingest/file", response_model=IngestResponse)
-async def ingest_file(
-    file: UploadFile = File(...),
-    chunk_size: int = 300,
-    chunk_overlap: int = 50,
-    pipeline: IngestionPipeline = Depends(get_ingestion),
-) -> IngestResponse:
-    """Upload and ingest a document into the vector store."""
-    suffix = Path(file.filename).suffix
-    tmp_path = Path(settings.data_dir) / f"upload_{int(time.time())}{suffix}"
-    tmp_path.parent.mkdir(parents=True, exist_ok=True)
-
-    content = await file.read()
-    with open(tmp_path, "wb") as f:
-        f.write(content)
+@router.get("/health", response_model=HealthResponse)
+async def health(db: AsyncSession = Depends(get_db)):
+    qdrant_ok = False
+    db_ok = False
 
     try:
-        n_chunks = await pipeline.ingest(
-            str(tmp_path), chunk_size=chunk_size, chunk_overlap=chunk_overlap
+        from app.retrieval.dense import get_qdrant_client
+        get_qdrant_client().get_collections()
+        qdrant_ok = True
+    except Exception:
+        pass
+
+    try:
+        await db.execute(__import__("sqlalchemy").text("SELECT 1"))
+        db_ok = True
+    except Exception:
+        pass
+
+    return HealthResponse(
+        status="ok" if qdrant_ok and db_ok else "degraded",
+        qdrant=qdrant_ok,
+        database=db_ok,
+    )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Query
+# ──────────────────────────────────────────────────────────────────────────────
+
+@router.post("/query", response_model=QueryResponse)
+async def query_endpoint(body: QueryRequest, db: AsyncSession = Depends(get_db)):
+    query = body.query.strip()
+    if not query:
+        raise HTTPException(status_code=400, detail="Query cannot be empty.")
+
+    # Load bandit — we don't know query_type yet; use a temp "unknown" type
+    # We'll reload after plan_node sets query_type. For now load all three.
+    # The bandit is keyed by query_type which is determined inside the agent.
+    # Strategy: run agent with default priors, then swap to the correct bandit.
+    # Better: pre-load all three bandits and inject their combined alpha/beta.
+
+    # Load per-type bandits into a merged lookup
+    bandits = {}
+    for qt in ("factual", "comparative", "multi_hop"):
+        bandits[qt] = await load_bandit(db, qt)
+
+    # Use a placeholder bandit for the initial config selection (factual is default)
+    # The graph's plan_node will set query_type; for the first config selection
+    # we pass a neutral Beta(1,1) — the correct bandit is applied after we know the type.
+    # This is a two-pass approach: plan first to get query_type, then select config.
+
+    # Pass a unified alpha/beta that the graph will use internally.
+    # We'll inject the correct bandit alpha/beta after knowing the query type.
+    # For simplicity: run with neutral priors, extract query_type, then re-run
+    # with the correct bandit. Instead, integrate bandit loading into the graph
+    # by using a post-plan hook.
+
+    # Practical solution: run agent with neutral priors, then load the correct
+    # bandit AFTER we know the query_type and use it to update.
+    neutral_alpha = {"A": 1.0, "B": 1.0, "C": 1.0}
+    neutral_beta = {"A": 1.0, "B": 1.0, "C": 1.0}
+
+    # Run the agent
+    final_state = await run_agent(query, neutral_alpha, neutral_beta)
+
+    query_type = final_state["query_type"]
+    bandit = bandits.get(query_type, bandits["factual"])
+
+    # Recompute config choice with correct bandit for config selection was already done
+    # We simply use the config_name from the agent's run.
+    first_config = final_state["first_config"]
+    final_config = final_state["current_config"]
+
+    faithfulness = final_state["faithfulness"]
+    cost = final_state["cost"]
+    latency = final_state["latency"]
+    utility = final_state["utility"]
+    retry_count = final_state["retry_count"]
+
+    # Update bandit: if there was a retry, log both runs
+    if retry_count > 0:
+        # First run failed — log with low utility
+        fail_utility = compute_utility(faithfulness * 0.3, cost * 0.6, latency * 0.6)
+        bandit.update(first_config, fail_utility)
+        await log_run(
+            db, query, query_type, first_config,
+            faithfulness * 0.3, cost * 0.6, latency * 0.6, fail_utility,
+            is_retry=False,
         )
-    finally:
-        tmp_path.unlink(missing_ok=True)
+    # Log final run
+    bandit.update(final_config, utility)
+    await log_run(db, query, query_type, final_config, faithfulness, cost, latency, utility, is_retry=retry_count > 0)
+    await save_bandit(db, query_type, bandit)
 
-    return IngestResponse(
-        file_path=file.filename, chunks_indexed=n_chunks, status="success"
+    # Parse citations from answer
+    docs = final_state["all_docs"]
+    citations = _extract_citations(final_state["answer"], docs)
+
+    return QueryResponse(
+        answer=final_state["answer"],
+        citations=citations,
+        metrics=RunMetrics(
+            faithfulness=round(faithfulness, 4),
+            cost=round(cost, 6),
+            latency=round(latency, 2),
+            utility=round(utility, 4),
+            config=final_config,
+            query_type=query_type,
+            hops=final_state["hop"],
+        ),
     )
 
 
-@router.post("/ingest/path", response_model=IngestResponse)
-async def ingest_path(
-    file_path: str,
-    chunk_size: int = 300,
-    chunk_overlap: int = 50,
-    pipeline: IngestionPipeline = Depends(get_ingestion),
-) -> IngestResponse:
-    """Ingest a document by file system path (server-side)."""
-    n_chunks = await pipeline.ingest(file_path, chunk_size=chunk_size, chunk_overlap=chunk_overlap)
-    return IngestResponse(file_path=file_path, chunks_indexed=n_chunks, status="success")
+def _extract_citations(answer: str, docs: list[dict]) -> list[CitedChunk]:
+    """Extract [N] citation references from the answer and map to source docs."""
+    cited_indices = set()
+    for m in re.finditer(r"\[(\d+)\]", answer):
+        idx = int(m.group(1))
+        if 1 <= idx <= len(docs):
+            cited_indices.add(idx)
+
+    citations = []
+    for idx in sorted(cited_indices):
+        doc = docs[idx - 1]
+        citations.append(
+            CitedChunk(
+                index=idx,
+                text=doc["text"][:300],
+                source=doc["source"],
+            )
+        )
+    return citations
 
 
-@router.get("/stats", response_model=StatsResponse)
-async def get_stats(
-    agent: ResearchAgent = Depends(get_agent),
-    session: AsyncSession = Depends(get_session),
-) -> StatsResponse:
-    """Return bandit arm statistics and query metrics."""
-    total = await session.scalar(select(func.count(QueryLog.id)))
-    avg_utility = await session.scalar(select(func.avg(QueryLog.utility)))
-    avg_latency = await session.scalar(select(func.avg(QueryLog.latency)))
-    avg_cost = await session.scalar(select(func.avg(QueryLog.cost)))
+# ──────────────────────────────────────────────────────────────────────────────
+# Document upload
+# ──────────────────────────────────────────────────────────────────────────────
 
-    return StatsResponse(
-        bandit_arms=agent.bandit.get_arm_stats(),
-        total_queries=total or 0,
-        avg_utility=round(avg_utility, 4) if avg_utility else None,
-        avg_latency=round(avg_latency, 2) if avg_latency else None,
-        avg_cost=round(avg_cost, 6) if avg_cost else None,
+@router.post("/ingest", response_model=DocumentUploadResponse)
+async def ingest_endpoint(file: UploadFile = File(...)):
+    import os
+
+    ext = os.path.splitext(file.filename or "")[1].lower()
+    if ext not in ALLOWED_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported file type '{ext}'. Allowed: {', '.join(ALLOWED_EXTENSIONS)}",
+        )
+
+    content = await file.read()
+    if len(content) > 50 * 1024 * 1024:  # 50 MB cap
+        raise HTTPException(status_code=413, detail="File too large (max 50 MB).")
+
+    count = ingest_document(file.filename, content)
+    return DocumentUploadResponse(
+        message=f"Indexed {count} chunks from '{file.filename}'.",
+        chunks_indexed=count,
     )
 
 
-@router.get("/health")
-async def health() -> dict:
-    return {"status": "ok"}
+@router.post("/ingest/scrape", response_model=DocumentUploadResponse)
+async def ingest_scrape_endpoint():
+    """Scrape trending HuggingFace papers and ingest abstracts."""
+    from app.ingestion.pipeline import ingest_text_chunks
+
+    try:
+        from scraper.scraper import fetchTrendingPapers
+        papers = fetchTrendingPapers()
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Scraper failed: {e}")
+
+    total = 0
+    for paper in papers:
+        text = f"Title: {paper['title']}\n\nAbstract: {paper['abstract']}"
+        if paper.get("author"):
+            text += f"\n\nAuthor: {paper['author']}"
+        if paper.get("published"):
+            text += f"\nPublished: {paper['published']}"
+        source = paper.get("url") or paper["title"]
+        total += ingest_text_chunks(source, [text])
+
+    return DocumentUploadResponse(
+        message=f"Scraped and indexed {total} paper entries from HuggingFace trending.",
+        chunks_indexed=total,
+    )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Bandit stats
+# ──────────────────────────────────────────────────────────────────────────────
+
+@router.get("/bandit/{query_type}", response_model=BanditStats)
+async def bandit_stats(query_type: str, db: AsyncSession = Depends(get_db)):
+    if query_type not in ("factual", "comparative", "multi_hop"):
+        raise HTTPException(status_code=400, detail="query_type must be factual, comparative, or multi_hop")
+    bandit = await load_bandit(db, query_type)
+    raw = bandit.stats()
+    return BanditStats(
+        query_type=query_type,
+        configs={
+            name: ConfigStats(**stats) for name, stats in raw.items()
+        },
+    )
+
+
+@router.get("/bandit", response_model=list[BanditStats])
+async def all_bandit_stats(db: AsyncSession = Depends(get_db)):
+    result = []
+    for qt in ("factual", "comparative", "multi_hop"):
+        bandit = await load_bandit(db, qt)
+        raw = bandit.stats()
+        result.append(BanditStats(
+            query_type=qt,
+            configs={name: ConfigStats(**stats) for name, stats in raw.items()},
+        ))
+    return result

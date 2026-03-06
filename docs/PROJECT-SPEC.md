@@ -1,724 +1,472 @@
 # Autonomous Research Agent with Adaptive Retrieval Optimization
 
+> **Technical Specification Document**
+>
+> Includes design decisions, discussion notes & implementation guidance
+
 ---
 
 # 1. Project Overview
 
-## 1.1 Motivation
+LLM-based Retrieval-Augmented Generation (RAG) systems typically rely on **static retrieval configurations** — fixed `top_k`, `chunk_size`, and reranking strategy. However, different query types require fundamentally different retrieval strategies:
 
-Large Language Model (LLM)-based **Retrieval-Augmented Generation (RAG)** systems typically rely on **static retrieval configurations**, such as fixed:
+| Query Type           | Retrieval Requirement                     |
+| -------------------- | ----------------------------------------- |
+| Factual lookup       | Shallow retrieval, low `top_k`            |
+| Comparative analysis | Multiple relevant documents, high `top_k` |
+| Multi-hop reasoning  | Iterative retrieval across hops           |
 
-- `top_k`
-- `chunk_size`
-- reranking strategy
-
-However, different query types require different retrieval strategies.
-
-For example:
-
-| Query Type           | Retrieval Requirement       |
-| -------------------- | --------------------------- |
-| Factual lookup       | shallow retrieval           |
-| Comparative analysis | multiple relevant documents |
-| Multi-hop reasoning  | iterative retrieval         |
-
-Using a single static configuration introduces several problems:
+A single static configuration causes:
 
 - Increased hallucination rate
 - Weak citation grounding
 - Unnecessary retrieval cost
 - Higher latency
 
-This project proposes an **Autonomous Research Agent** capable of:
+This project builds an **Autonomous Research Agent** that evaluates its own output quality and **adapts retrieval strategies over time under a fixed cost constraint**.
 
-> Evaluating its own output quality and **adapting retrieval strategies over time under a fixed cost constraint**.
-
-Instead of only answering questions, the system acts as a **meta-agent** that continuously optimizes its own RAG pipeline.
+Instead of only answering questions, the system acts as a **meta-agent that continuously optimizes its own RAG pipeline**.
 
 ---
 
-## 1.2 Core Capabilities
+# 2. Core Capabilities
 
-### 1. Iterative Multi-hop Retrieval
+## 2.1 Iterative Multi-Hop Retrieval
 
-The system can perform retrieval across multiple steps.
+1. Generate follow-up queries from intermediate evidence
+2. Perform second-hop retrieval if necessary
+3. Allows answering multi-hop reasoning questions (**max 2 hops**)
 
-Capabilities:
+## 2.2 Hybrid Retrieval
 
-- Generate follow-up queries from intermediate evidence
-- Perform second-hop retrieval if necessary
+1. Dense embedding search (`bge-small-en-v1.5`)
+2. Sparse lexical search (**BM25**)
+3. Dense + BM25 run **in parallel**, then merged and deduplicated
+4. Cross-encoder reranking (`bge-reranker-base`, optional per config)
 
-This allows the system to answer **multi-hop reasoning questions**.
+## 2.3 Citation-Aware Answer Generation
 
----
+1. Extract evidence spans from retrieved documents
+2. Generate grounded responses with explicit citations
+3. Reduces hallucination and improves answer transparency
 
-### 2. Hybrid Retrieval
+## 2.4 Self-Evaluation (Lightweight)
 
-The retrieval pipeline combines:
+The system evaluates its own answers using **a single LLM call** — not full RAGAS at runtime.
 
-- Dense embedding search
-- Sparse lexical search (BM25)
-- Optional cross-encoder reranking
+RAGAS is reserved for **offline benchmarking only**.
 
-This hybrid approach improves both **recall** and **precision**.
+1. Faithfulness score: fraction of answer statements supported by context
+2. If `faithfulness < threshold (0.7)`, retry once with a different config
+3. Both runs logged to the Bandit
 
----
-
-### 3. Citation-aware Answer Generation
-
-The system produces answers with explicit citations.
-
-Capabilities:
-
-- Extract evidence spans from retrieved documents
-- Generate grounded responses
-- Attach citations to supporting evidence
-
-This reduces hallucination and improves answer transparency.
-
----
-
-### 4. Self-Evaluation
-
-The system evaluates its own answers using LLM-based scoring.
-
-Evaluation includes:
-
-- Faithfulness
-- Citation grounding
-- Evidence coverage
-- Cost tracking
-- Latency tracking
-
-If answer quality is below threshold, the system may retry using a different retrieval configuration.
+> **Design Decision — Why not full RAGAS at runtime?**
+>
+> RAGAS internally calls the LLM **2–3 times per metric computation**.
+> With retries, one query could trigger **8–10 LLM calls**, exhausting a **$10 budget** quickly.
+>
+> **Solution**
+>
+> - Lightweight single-call evaluator at runtime
+> - RAGAS used **offline only**
 
 ---
 
-### 5. Adaptive Retrieval Optimization
+## 2.5 Adaptive Retrieval Optimization (Thompson Sampling)
 
-The system maintains multiple retrieval configurations and selects among them using a **Multi-Armed Bandit algorithm**.
+The system maintains **3 retrieval configurations** and selects among them using **Thompson Sampling**.
 
-Example retrieval configurations:
+| Config | top_k | chunk_size | rerank | Intended Strategy                  |
+| ------ | ----- | ---------- | ------ | ---------------------------------- |
+| A      | 5     | 256        | No     | Fast & cheap — factual queries     |
+| B      | 10    | 512        | No     | Broad recall — comparative queries |
+| C      | 10    | 512        | Yes    | High precision — multi-hop queries |
 
-| Config | top_k | chunk_size | rerank |
-| ------ | ----- | ---------- | ------ |
-| A      | 5     | 200        | No     |
-| B      | 8     | 300        | No     |
-| C      | 8     | 300        | Yes    |
-
-The system optimizes the following utility function:
-
-[
-Utility = Faithfulness - \lambda_1 \times Cost - \lambda_2 \times Latency
-]
-
----
-
-### 6. Strategy Memory
-
-The system stores historical performance data:
-
-- query embedding
-- retrieval configuration used
-- resulting utility score
-
-Queries are clustered to learn **which retrieval strategy works best for each query type**.
-
----
-
-## 1.3 Input
-
-Supported input formats:
-
-### Text
-
-- PDF
-- HTML
-- Markdown
-- DOCX
-- TXT
-
-### Image
-
-- PNG
-- JPG
-- JPEG
-- WEBP
-
-Images may contain:
-
-- figures
-- diagrams
-- tables
-
-Processing pipeline:
+### Utility Function
 
 ```
-Image
-  ↓
-OCR
-  ↓
-Caption extraction
-  ↓
-Index as text chunk
+Utility = Faithfulness − λ₁ × Cost_norm − λ₂ × Latency_norm
 ```
 
----
-
-## 1.4 Output
-
-The system produces:
-
-- Structured Markdown reports
-- Answers with citation references
-- Cost tracking
-- Latency tracking
-- Utility score
-
-Example output:
+Where
 
 ```
-Answer:
-Transformer models replaced RNNs due to improved parallelization
-and attention mechanisms [1][2].
-
-Latency: 8.2s
-Cost: $0.002
-Utility: 0.87
+λ₁ = 0.3
+λ₂ = 0.2
 ```
 
----
-
-# 2. System Architecture
-
-The system is divided into four main layers:
-
-1. Agent Orchestration Layer
-2. Retrieval Layer
-3. Self-Improvement Layer
-4. Memory Layer
-
----
-
-# 2.1 Agent Orchestration Layer
-
-The orchestration layer controls the overall reasoning workflow.
-
-Pipeline:
+Priority ordering:
 
 ```
-User Query
-    ↓
-Planner
-    ↓
-Retrieval Loop (1–2 hops)
-    ↓
-Reader
-    ↓
-Writer
-    ↓
-Answer + Citations
+Faithfulness > Cost > Latency
 ```
 
----
+Normalization:
 
-### Planner
+```
+Cost_norm = cost / 0.005
+Latency_norm = latency / 15.0
+```
 
-The planner determines the retrieval strategy.
+## 2.6 Strategy Memory (Rule-Based)
 
-Responsibilities:
+Each query type has **its own Bandit instance**.
 
-- Classify query type
-- Determine retrieval depth
-
-Example output:
-
-```json
-{
-  "query_type": "multi_hop",
-  "max_hops": 2
+```python
+bandits = {
+    "factual":     ThompsonSamplingBandit(configs),
+    "comparative": ThompsonSamplingBandit(configs),
+    "multi_hop":   ThompsonSamplingBandit(configs),
 }
 ```
 
-Query types include:
-
-- factual
-- comparative
-- multi-hop
+> **Design Decision — Why not KMeans?**
+>
+> KMeans requires **50–100+ queries** before clusters stabilize. Demo sessions only have **20–50 queries**, producing near-random clusters.
+>
+> Additionally, re-clustering **invalidates Bandit history**.
+>
+> Therefore, **Rule-based classification at runtime** and **KMeans used offline** for analysis and visualization.
 
 ---
 
-### Reader
+# 3. Data, Input & Output
 
-The reader processes retrieved context.
+## 3.1 Input
+
+User Query: Text only
+
+Documents:
+
+- Supported formats: PDF, HTML, Markdown, DOCX, TXT
+- Documents may contain **embedded images** (figures, tables, diagrams).
+- Standalone image uploads (PNG/JPG/JPEG/WEBP) are **not supported**.
+
+## 3.2 Data Sources
+
+1. User uploads
+2. Web scraper: top-50 trending papers from `huggingface.co/papers/trending` (backend/scraper/scaper.py)
+
+Sources can be **combined**.
+
+## 3.3 Document Processing Pipeline
+
+All documents pass through **Unstructured**.
+
+```
+Document (PDF / HTML / MD / DOCX / TXT)
+↓
+Unstructured (element classification)
+↓
+Text elements → hierarchical chunking
+Image elements → OCR (Tesseract)
+↓
+Embedding (bge-small-en-v1.5)
+↓
+Vector Index (Qdrant)
+```
+
+### Embedded Image Handling
+
+- Unstructured detects images
+- OCR extracts text
+- OCR output indexed as normal text chunk
+- No Vision LLM captioning
+
+Trade-off:
+
+- **Text images supported**
+- **Pure visual diagrams skipped**
+
+## 3.4 Output Format
+
+Responses return a **structured Markdown report** including:
+
+- Citation references `[1][2]`
+- Faithfulness score
+- Latency
+- Cost
+- Utility score
+
+---
+
+# 4. System Architecture
+
+## 4.1 Agent Orchestration Layer
+
+Workflow:
+
+```
+User Query
+ → Planner
+ → Retrieval Loop
+ → Reader
+ → Writer
+ → Answer + Citations
+```
+
+### 4.1.1 Planner
+
+Classifies query type.
+
+Output:
+
+```json
+{
+  "query_type": "multi_hop | comparative | factual",
+  "max_hops": 1 | 2
+}
+```
+
+### 4.1.2 Reader
 
 Responsibilities:
 
-- Extract relevant evidence spans
+- Extract evidence spans
 - Identify missing information
-- Generate follow-up queries if needed
+- Generate follow-up queries
 
-Example follow-up query:
-
-```
-"What limitations of RNNs led to transformer adoption?"
-```
-
----
-
-### Writer
-
-The writer generates the final answer using retrieved evidence.
+### 4.1.3 Writer
 
 Responsibilities:
 
-- Synthesize information
-- Produce grounded answers
-- Attach citation references
+- Synthesize evidence
+- Generate grounded answers with citations
 
----
-
-# 2.2 Retrieval Layer
-
-The retrieval layer implements hybrid search.
-
-Pipeline:
+## 4.2 Retrieval Layer
 
 ```
 Query
    ↓
-Dense Retrieval (bge-small)
+Dense Retrieval
+    ‖
 BM25 Retrieval
    ↓
 Merge & Deduplicate
    ↓
-Cross-Encoder Rerank
+Optional Rerank
    ↓
 Top-N Context
 ```
 
-Dense and BM25 retrieval run **in parallel**.
+Only **Config C uses reranking**.
 
----
-
-### Retrieval Configurations
-
-The system maintains several retrieval configurations.
-
-Example:
-
-| Config | top_k | chunk_size | rerank |
-| ------ | ----- | ---------- | ------ |
-| A      | 5     | 200        | No     |
-| B      | 8     | 300        | No     |
-| C      | 8     | 300        | Yes    |
-
-A Multi-Armed Bandit algorithm selects the configuration with the highest expected utility.
-
----
-
-# 2.3 Self-Improvement Layer
-
-This layer evaluates answer quality and updates retrieval policies.
-
-Pipeline:
+## 4.3 Self-Improvement Layer
 
 ```
-Generated Answer
-       ↓
+Answer
+↓
 Evaluator
-       ↓
-Metric Computation
-       ↓
-Bandit Optimizer
-       ↓
-Update Retrieval Policy
+↓
+Faithfulness Score
+↓
+Bandit Update
+↓
+Retry if < 0.7
+```
+
+Retry rules:
+
+- Retry **max once**
+- Both runs logged
+- Prevent **survivorship bias**
+
+## 4.4 Memory Layer
+
+Stores:
+
+- `alpha` and `beta` for each config
+- Full run history
+  - config
+  - utility
+  - cost
+  - latency
+
+Offline **KMeans clustering** used for post-hoc analysis.
+
+---
+
+# 5. Tech Stack
+
+| Component           | Technology           | Notes                      |
+| ------------------- | -------------------- | -------------------------- |
+| LLM                 | Gemini 2.5 Flash     | Planner, Writer, Evaluator |
+| Agent orchestration | LangGraph            |                            |
+| Dense embedding     | bge-small-en-v1.5    |                            |
+| Sparse retrieval    | BM25                 |                            |
+| Vector DB           | Qdrant               | Docker container           |
+| Reranker            | bge-reranker-base    | Config C only              |
+| Document parsing    | Unstructured         | OCR included               |
+| Offline evaluation  | RAGAS                | Not runtime                |
+| Backend             | FastAPI + PostgreSQL | Docker                     |
+| Frontend            | Next.js + shadcn/ui  | Vercel                     |
+| Package manager     | uv                   |                            |
+| Deploy              | Docker Compose       |                            |
+
+---
+
+# 6. Thompson Sampling Implementation
+
+## 6.1 Algorithm Choice
+
+- Algorithm: Thompson Sampling
+- Expore Logic: Bayesian posterior
+
+## 6.2 Reward Binarization
+
+```
+success = 1  if utility >= 0.7
+success = 0  otherwise
+```
+
+Loss of precision but keeps the algorithm correct.
+
+## 6.3 Implementation Sketch
+
+```python
+class ThompsonSamplingBandit:
+
+    def __init__(self, configs):
+        self.configs = configs
+        self.alpha = {c: 1 for c in configs} # Beta(1,1)
+        self.beta  = {c: 1 for c in configs} # Beta(1,1)
+
+    def select_config(self, exclude=None):
+        samples = {
+            c: np.random.beta(self.alpha[c], self.beta[c])
+            for c in self.configs if c != exclude
+        }
+        return max(samples, key=samples.get)
+
+    def update(self, config, utility, threshold=0.7):
+
+        if utility >= threshold:
+            self.alpha[config] += 1
+        else:
+            self.beta[config] += 1
 ```
 
 ---
 
-### Evaluation Metrics
+# 7. Utility Function
 
-The evaluator computes:
-
-- Faithfulness
-- Citation grounding ratio
-- Context overlap
-- Retrieval precision@k (when ground truth is available)
-- Cost per query
-- Latency
-
-If:
+## 7.1 Formula
 
 ```
-Faithfulness < threshold
+Utility = Faithfulness − λ₁ × Cost_norm − λ₂ × Latency_norm
 ```
 
-The system retries once using a different retrieval configuration.
+| Metric       | Range          | Normalization | Weight |
+| ------------ | -------------- | ------------- | ------ |
+| Faithfulness | 0–1            | none          | 1.0    |
+| Cost         | $0.0001–$0.005 | cost/0.005    | λ₁=0.3 |
+| Latency      | 3–15s          | latency/15    | λ₂=0.2 |
 
----
+## 7.2 Implementation
 
-# 2.4 Memory Layer
+```python
+def compute_utility(faithfulness, cost, latency,
+                    lambda1=0.3, lambda2=0.2):
 
-The memory layer stores historical performance.
+    cost_norm    = cost / 0.005
+    latency_norm = latency / 15.0
 
-Stored fields:
-
-- query embedding
-- retrieval configuration
-- utility score
-- cost
-- latency
-
-Queries are clustered using **KMeans**.
-
-Runtime usage:
-
-```
-New Query
-   ↓
-Find nearest cluster
-   ↓
-Select best retrieval config for that cluster
-```
-
-This allows the system to learn **retrieval strategies for different query types**.
-
----
-
-# 3. Tech Stack
-
----
-
-# 3.1 LLM & Agent
-
-Model used:
-
-| Component | Model            |
-| --------- | ---------------- |
-| Planner   | Gemini 2.5 Flash |
-| Writer    | Gemini 2.5 Flash |
-| Evaluator | Gemini 2.5 Flash |
-
-Agent orchestration:
-
-- LangGraph
-
----
-
-# 3.2 Embedding & Retrieval & Vector DB
-
-Dense embedding:
-
-```
-bge-small-en-v1.5
-```
-
-Sparse retrieval:
-
-```
-BM25
-```
-
-Vector database:
-
-```
-Qdrant
-```
-
-Reranker:
-
-```
-bge-reranker-small
+    return faithfulness \
+           - lambda1 * cost_norm \
+           - lambda2 * latency_norm
 ```
 
 ---
 
-# 3.3 Evaluation & Observability
+# 8. Self-Evaluation & Retry Logic
 
-Evaluation tools:
+## 8.1 Evaluator Prompt
 
-- RAGAS (offline evaluation)
+```text
+Given the answer and retrieved context below, score the faithfulness from 0.0 to 1.0.
 
-Metrics logging:
+Faithfulness = fraction of answer statements supported by context.
 
-- cost
-- latency
-- retrieval config frequency
+Context: {context}
+Answer: {answer}
 
-Logs stored as:
-
-```
-JSON logs
+Respond JSON:
+{"faithfulness": float, "reasoning": str}
 ```
 
----
+## 8.2 Retry Pipeline
 
-# 3.4 Backend
+```python
+async def run_with_retry(query, bandit):
 
-Backend framework:
+    config = bandit.select_config()
 
-```
-FastAPI
-```
+    answer, context, metrics = await run_pipeline(query, config)
 
-Database:
+    faithfulness = await evaluate(answer, context)
 
-```
-PostgreSQL
-```
+    if faithfulness < FAITHFULNESS_THRESHOLD:
 
-Responsibilities:
+        utility_fail = compute_utility(faithfulness, ...)
+        bandit.update(config, utility_fail)
 
-- API serving
-- query routing
-- experiment logging
+        fallback = bandit.select_config(exclude=config)
 
----
+        answer, context, metrics = await run_pipeline(query, fallback)
 
-# 3.5 Frontend
+        faithfulness = await evaluate(answer, context)
 
-Frontend deployment:
+        utility = compute_utility(faithfulness, ...)
+        bandit.update(fallback, utility)
 
-```
-Vercel
-```
+    else:
 
-UI requirements:
+        utility = compute_utility(faithfulness, ...)
+        bandit.update(config, utility)
 
-- minimal
-- clean
-- focused on system outputs
-
-Display components:
-
-- user query
-- generated answer
-- citations
-- latency
-- cost
-- utility score
-
----
-
-# 3.6 Deploy
-
-Services deployed using:
-
-```
-Docker Compose
-```
-
-Containers:
-
-- Qdrant
-- PostgreSQL
-- API server
-
----
-
-# 3.7 Others
-
-Package manager:
-
-```
-uv
-```
-
-Testing strategy:
-
-### Unit tests
-
-- retrieval pipeline
-- metric computation
-
-### Integration tests
-
-- end-to-end query pipeline
-
----
-
-# 4. Dataset & Benchmark
-
----
-
-# 4.1 Domain Corpus
-
-The domain corpus consists of **AI research papers**.
-
-Sources:
-
-- arXiv (AI category)
-- OpenReview
-
-Corpus size:
-
-```
-~100 research papers
-```
-
-Processing pipeline:
-
-```
-PDF (PyMuPDF)
-   ↓
-Text parsing
-   ↓
-Hierarchical chunking
-   ↓
-Embedding
-   ↓
-Vector indexing
-```
-
-Hierarchical chunking structure:
-
-```
-Section
-   ↓
-Paragraph
-   ↓
-Chunk
+    return answer
 ```
 
 ---
 
-# 4.2 Benchmark Datasets & How to Use
+# 9. Benchmark & Evaluation
+
+## 9.1 Benchmark Datasets
 
 | Dataset  | Objective                     | Type         |
 | -------- | ----------------------------- | ------------ |
-| HotpotQA | multi-hop reasoning           | QA           |
-| SciFact  | scientific claim verification | verification |
+| HotpotQA | Multi-hop reasoning           | QA           |
+| SciFact  | Scientific claim verification | Verification |
 
-Usage:
+## 9.2 Experimental Protocol
 
-HotpotQA:
+Compare **Static RAG vs Adaptive Bandit RAG**
 
-- evaluate multi-hop reasoning
-- test retrieval depth strategies
+| Metric                | Static      | Adaptive Target |
+| --------------------- | ----------- | --------------- |
+| Faithfulness          | Fixed       | Higher          |
+| Citation accuracy     | Fixed       | Higher          |
+| Cost/query            | Fixed       | Lower           |
+| Retrieval precision@k | Fixed       | Higher          |
+| Utility               | Not tracked | Optimized       |
 
-SciFact:
+Baseline:
 
-- evaluate evidence grounding
-- test citation correctness
+```
+top_k=5
+chunk_size=300
+rerank=off
+single-hop
+```
 
 ---
 
-# 4.3 Evaluation Metrics
+# 10. Constraints
 
-Quality metrics:
-
-- F1
-- Faithfulness
-- Citation accuracy
-  (percentage of answer statements supported by evidence)
-
-Retrieval metrics:
-
-- Retrieval precision@k (when ground truth evidence available)
-
-System metrics:
-
-- Utility score
-- Cost per query
-- Latency
-
----
-
-# 4.4 Experimental Protocol
-
-The experiment compares:
-
-```
-1. Static RAG baseline
-2. Adaptive Bandit RAG
-```
-
-Example baseline configuration:
-
-```
-top_k = 5
-chunk_size = 300
-rerank = off
-single-hop retrieval
-```
-
-The experiment aims to demonstrate:
-
-- Reduced hallucination rate
-- Improved citation grounding
-- Lower retrieval cost under fixed budget
-
----
-
-# 5. Other Technical Requirements
-
-Latency target:
-
-```
-≤ 15 seconds per query
-```
-
-Latency measured from:
-
-```
-user query received → final answer returned
-```
-
-Budget constraint:
-
-```
-Total project cost ≤ $10
-```
-
-Cost control strategies:
-
-- limit self-evaluation calls
-- retry at most once
-- minimize LLM calls
-
----
-
-# 6. Example Execution Flow
-
-Example query:
-
-```
-Why did Transformer models replace RNNs in NLP?
-```
-
-Execution steps:
-
-```
-User Query
-     ↓
-Planner classifies query
-     ↓
-Bandit selects retrieval config
-     ↓
-Hybrid retrieval (dense + BM25)
-     ↓
-Reranker selects best context
-     ↓
-Reader extracts evidence
-     ↓
-Writer generates answer
-     ↓
-Evaluator scores answer
-     ↓
-Utility computed
-     ↓
-Bandit updates policy
-     ↓
-Memory stores result
-     ↓
-Return answer to user
-```
-
-The system gradually learns:
-
-```
-Which retrieval strategy works best for each query type.
-```
-
-This enables continuous **adaptive optimization of the RAG pipeline**.
+| Constraint     | Value | Notes           |
+| -------------- | ----- | --------------- |
+| Latency target | ≤15s  | end-to-end      |
+| Budget         | ≤$10  | total           |
+| Retry limit    | 1     | logged          |
+| Max hops       | 2     | planner decides |
+| Bandit configs | 3     | A,B,C           |

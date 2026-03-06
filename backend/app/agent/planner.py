@@ -1,60 +1,60 @@
 import json
 import re
 
+from langchain_core.messages import HumanMessage
 from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_core.prompts import ChatPromptTemplate
 
 from app.config import settings
 
-PLAN_PROMPT = ChatPromptTemplate.from_messages(
-    [
-        (
-            "system",
-            "You are a query planner for a research retrieval system. "
-            "Classify the user query and determine retrieval depth.",
-        ),
-        (
-            "human",
-            """Classify the following query and determine retrieval strategy.
+
+def get_llm() -> ChatGoogleGenerativeAI:
+    return ChatGoogleGenerativeAI(
+        model=settings.gemini_model,
+        google_api_key=settings.gemini_api_key,
+        temperature=0.0,
+    )
+
+
+def classify_rule_based(query: str) -> str:
+    """Lightweight rule-based fallback (as per spec: no KMeans at runtime)."""
+    q = query.lower()
+    if any(w in q for w in ["compare", "difference", "vs", "versus", "contrast", "better than", "which is"]):
+        return "comparative"
+    if any(w in q for w in ["why", "how does", "explain", "what caused", "what led", "relationship between", "connection between"]):
+        return "multi_hop"
+    return "factual"
+
+
+PLAN_PROMPT = """\
+Classify the following research query into one of three types:
+- "factual": simple fact lookup, single-document answer
+- "comparative": comparing multiple things, methods, or papers
+- "multi_hop": requires reasoning across multiple documents or steps
 
 Query: {query}
 
-Respond ONLY with valid JSON (no markdown, no explanation):
-{{
-  "query_type": "<factual|comparative|multi_hop>",
-  "max_hops": <1 or 2>,
-  "reasoning": "<brief reasoning>"
-}}
+Respond with JSON only:
+{{"query_type": "factual|comparative|multi_hop", "max_hops": 1}}
 
-Guidelines:
-- factual: single-step lookup (max_hops=1)
-- comparative: comparing multiple topics (max_hops=1 or 2)
-- multi_hop: requires chaining multiple pieces of evidence (max_hops=2)""",
-        ),
-    ]
-)
+Use max_hops=2 only for multi_hop queries. For all others use max_hops=1."""
 
 
-class Planner:
-    def __init__(self):
-        self.llm = ChatGoogleGenerativeAI(
-            model=settings.gemini_model,
-            google_api_key=settings.gemini_api_key,
-            temperature=0,
-        )
-        self.chain = PLAN_PROMPT | self.llm
-
-    async def plan(self, query: str) -> dict:
-        response = await self.chain.ainvoke({"query": query})
+async def plan_query(query: str) -> dict:
+    """Returns {"query_type": str, "max_hops": int}"""
+    prompt = PLAN_PROMPT.format(query=query)
+    llm = get_llm()
+    try:
+        response = await llm.ainvoke([HumanMessage(content=prompt)])
         text = response.content.strip()
-        # Strip markdown code fences if present
-        text = re.sub(r"^```(?:json)?\s*", "", text)
-        text = re.sub(r"\s*```$", "", text)
-        try:
-            result = json.loads(text)
-        except json.JSONDecodeError:
-            result = {"query_type": "factual", "max_hops": 1, "reasoning": "parse error fallback"}
-        return {
-            "query_type": result.get("query_type", "factual"),
-            "max_hops": int(result.get("max_hops", 1)),
-        }
+        match = re.search(r"\{.*\}", text, re.DOTALL)
+        if match:
+            result = json.loads(match.group())
+            if result.get("query_type") not in ("factual", "comparative", "multi_hop"):
+                result["query_type"] = classify_rule_based(query)
+            result["max_hops"] = 2 if result["query_type"] == "multi_hop" else 1
+            return result
+    except Exception:
+        pass
+
+    query_type = classify_rule_based(query)
+    return {"query_type": query_type, "max_hops": 2 if query_type == "multi_hop" else 1}

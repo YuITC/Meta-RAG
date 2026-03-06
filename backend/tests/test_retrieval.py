@@ -1,77 +1,110 @@
-"""Unit tests for the retrieval pipeline."""
+"""Unit tests for the retrieval layer."""
+
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
-
-from app.retrieval.bm25_retrieval import BM25Retriever
-from app.retrieval.hybrid import HybridRetriever
 
 
-class TestBM25Retriever:
-    def test_search_returns_empty_when_no_corpus(self, tmp_path):
-        retriever = BM25Retriever(data_dir=str(tmp_path))
-        results = retriever.search("transformer attention", top_k=3)
-        assert results == []
+# ──────────────────────────────────────────────────────────────────────────────
+# BM25
+# ──────────────────────────────────────────────────────────────────────────────
 
-    def test_add_and_search(self, tmp_path):
-        retriever = BM25Retriever(data_dir=str(tmp_path))
-        docs = [
-            "Transformers use self-attention mechanisms",
-            "RNNs process sequences step by step",
-            "Attention allows parallel computation",
-        ]
-        ids = ["doc1", "doc2", "doc3"]
-        retriever.add_documents(ids, docs)
+def test_bm25_tokenize():
+    from app.retrieval.bm25_retrieval import _tokenize
 
-        results = retriever.search("attention transformer", top_k=2)
-        assert len(results) <= 2
-        assert all("id" in r and "text" in r and "score" in r for r in results)
-        # Top result should be about attention/transformers
-        assert results[0]["id"] in ["doc1", "doc3"]
-
-    def test_corpus_persistence(self, tmp_path):
-        r1 = BM25Retriever(data_dir=str(tmp_path))
-        r1.add_documents(["a"], ["hello world"])
-
-        r2 = BM25Retriever(data_dir=str(tmp_path))
-        results = r2.search("hello", top_k=1)
-        assert len(results) == 1
-        assert results[0]["id"] == "a"
-
-    def test_no_duplicate_ids(self, tmp_path):
-        retriever = BM25Retriever(data_dir=str(tmp_path))
-        retriever.add_documents(["dup"], ["first text"])
-        retriever.add_documents(["dup"], ["second text - should not be added"])
-        retriever._load_corpus()
-        assert retriever._doc_ids.count("dup") == 1
+    tokens = _tokenize("Hello World! How are you?")
+    assert "hello" in tokens
+    assert "world!" in tokens
 
 
-class TestHybridRetriever:
-    @pytest.mark.asyncio
-    async def test_retrieve_merges_and_deduplicates(self):
-        retriever = HybridRetriever()
+def test_bm25_returns_empty_on_no_index(monkeypatch):
+    import app.retrieval.bm25_retrieval as bm25_mod
 
-        doc_a = {"id": "doc1", "score": 0.9, "text": "A" * 400, "title": "T", "source": "s"}
-        doc_b = {"id": "doc2", "score": 0.7, "text": "B" * 100, "title": "T", "source": "s"}
-        doc_dup = {"id": "doc1", "score": 0.8, "text": "A" * 400, "title": "T", "source": "s"}
+    # Force empty corpus
+    monkeypatch.setattr(bm25_mod, "_bm25", None)
+    monkeypatch.setattr(bm25_mod, "_corpus", [])
 
-        retriever.dense.search = AsyncMock(return_value=[doc_a, doc_b])
-        retriever.bm25.search = MagicMock(return_value=[doc_dup])
+    results = bm25_mod.bm25_search("anything", top_k=5)
+    assert results == []
 
-        results = await retriever.retrieve("test query", config_id="A")
 
-        ids = [r["id"] for r in results]
-        assert len(ids) == len(set(ids)), "Duplicate IDs found"
-        assert len(results) <= 5  # top_k for config A
+def test_bm25_search_ranks_relevant_higher(monkeypatch):
+    from rank_bm25 import BM25Okapi
+    import app.retrieval.bm25_retrieval as bm25_mod
 
-    @pytest.mark.asyncio
-    async def test_truncation_applied(self):
-        retriever = HybridRetriever()
-        long_text = "word " * 500  # much longer than chunk_size=200
+    corpus = [
+        {"id": 1, "text": "transformer attention mechanism in NLP", "source": "a.pdf"},
+        {"id": 2, "text": "random unrelated content about cooking", "source": "b.pdf"},
+        {"id": 3, "text": "self-attention and transformer architecture", "source": "c.pdf"},
+    ]
+    tokenized = [bm25_mod._tokenize(d["text"]) for d in corpus]
+    monkeypatch.setattr(bm25_mod, "_corpus", corpus)
+    monkeypatch.setattr(bm25_mod, "_bm25", BM25Okapi(tokenized))
 
-        retriever.dense.search = AsyncMock(
-            return_value=[{"id": "x", "score": 0.9, "text": long_text, "title": "", "source": ""}]
-        )
-        retriever.bm25.search = MagicMock(return_value=[])
+    results = bm25_mod.bm25_search("transformer architecture", top_k=3)
+    assert len(results) >= 1
+    # Cooking doc should score lower than transformer docs
+    sources = [r["source"] for r in results]
+    if len(results) > 1:
+        assert "b.pdf" not in sources[:1]
 
-        results = await retriever.retrieve("query", config_id="A")  # chunk_size=200
-        assert len(results[0]["text"]) <= 200 * 4 + 10  # character-level truncation
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Hybrid / RRF
+# ──────────────────────────────────────────────────────────────────────────────
+
+def test_rrf_score_decreases_with_rank():
+    from app.retrieval.hybrid import _rrf_score
+
+    assert _rrf_score(0) > _rrf_score(1) > _rrf_score(10)
+
+
+def test_hybrid_deduplicates(monkeypatch):
+    from app.retrieval import hybrid
+
+    doc = {"id": 42, "text": "shared doc", "source": "x.pdf", "score": 0.9}
+
+    monkeypatch.setattr(hybrid, "dense_search", lambda q, top_k: [doc])
+    monkeypatch.setattr(hybrid, "bm25_search", lambda q, top_k: [doc])
+
+    results = hybrid.hybrid_search("test", top_k=5)
+    # Same doc should appear only once
+    ids = [r["id"] for r in results]
+    assert ids.count(42) == 1
+
+
+def test_hybrid_fuses_scores(monkeypatch):
+    from app.retrieval import hybrid
+
+    dense_docs = [
+        {"id": 1, "text": "doc one", "source": "a", "score": 0.9},
+        {"id": 2, "text": "doc two", "source": "b", "score": 0.8},
+    ]
+    bm25_docs = [
+        {"id": 2, "text": "doc two", "source": "b", "score": 5.0},
+        {"id": 3, "text": "doc three", "source": "c", "score": 4.0},
+    ]
+    monkeypatch.setattr(hybrid, "dense_search", lambda q, top_k: dense_docs)
+    monkeypatch.setattr(hybrid, "bm25_search", lambda q, top_k: bm25_docs)
+
+    results = hybrid.hybrid_search("test", top_k=5)
+    # doc 2 appears in both sources so should rank highly
+    ids = [r["id"] for r in results]
+    assert 2 in ids
+    assert ids.index(2) == 0  # highest fused score
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Dense text_to_id
+# ──────────────────────────────────────────────────────────────────────────────
+
+def test_text_to_id_deterministic():
+    from app.retrieval.dense import text_to_id
+
+    id1 = text_to_id("hello world", "doc.pdf")
+    id2 = text_to_id("hello world", "doc.pdf")
+    assert id1 == id2
+
+
+def test_text_to_id_different_inputs_differ():
+    from app.retrieval.dense import text_to_id
+
+    assert text_to_id("hello", "a.pdf") != text_to_id("world", "a.pdf")
