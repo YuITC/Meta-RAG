@@ -27,6 +27,7 @@ class AgentState(TypedDict):
     query: str
     bandit_alpha: dict[str, float]
     bandit_beta: dict[str, float]
+    document_ids: list[int] | None
 
     # Planning output
     query_type: str
@@ -67,9 +68,9 @@ def _select_config(alpha: dict, beta: dict, exclude: str | None = None) -> str:
     return max(samples, key=samples.__getitem__)
 
 
-def _do_retrieve(query: str, config_name: str) -> list[dict]:
+def _do_retrieve(query: str, config_name: str, document_ids: list[int] | None = None) -> list[dict]:
     cfg = CONFIGS[config_name]
-    docs = hybrid_search(query, top_k=cfg["top_k"])
+    docs = hybrid_search(query, top_k=cfg["top_k"], document_ids=document_ids)
     if cfg["rerank"] and docs:
         docs = rerank(query, docs, top_k=cfg["top_k"])
     return docs
@@ -106,7 +107,7 @@ async def retrieve_node(state: AgentState) -> dict[str, Any]:
         if state["hop"] > 0 and state["followup_query"]
         else state["current_query"]
     )
-    new_docs = _do_retrieve(query, state["current_config"])
+    new_docs = _do_retrieve(query, state["current_config"], document_ids=state["document_ids"])
 
     # Deduplicate by doc id
     existing_ids = {d["id"] for d in state["all_docs"]}
@@ -239,7 +240,12 @@ def get_graph():
     return _graph
 
 
-async def run_agent(query: str, bandit_alpha: dict, bandit_beta: dict) -> AgentState:
+async def run_agent(
+    query: str, 
+    bandit_alpha: dict, 
+    bandit_beta: dict, 
+    document_ids: list[int] | None = None
+) -> AgentState:
     """
     Run the full agent pipeline and return the final state.
     The caller is responsible for updating the bandit after inspecting the result.
@@ -249,6 +255,7 @@ async def run_agent(query: str, bandit_alpha: dict, bandit_beta: dict) -> AgentS
         "query": query,
         "bandit_alpha": bandit_alpha,
         "bandit_beta": bandit_beta,
+        "document_ids": document_ids,
         # These will be set by plan_node
         "query_type": "",
         "max_hops": 1,

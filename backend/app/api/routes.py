@@ -23,7 +23,7 @@ from app.models.schemas import (
     RunMetrics,
 )
 from app.optimization.bandit import compute_utility
-from app.retrieval.dense import delete_by_document_id
+from app.retrieval.dense import delete_by_document_id, delete_by_source, wipe_all_embeddings
 
 router = APIRouter()
 
@@ -96,8 +96,12 @@ async def query_endpoint(body: QueryRequest, db: AsyncSession = Depends(get_db))
     neutral_alpha = {"A": 1.0, "B": 1.0, "C": 1.0}
     neutral_beta = {"A": 1.0, "B": 1.0, "C": 1.0}
 
+    # Fetch active document IDs to prevent retrieving from deleted documents
+    doc_result = await db.execute(select(Document.id))
+    active_doc_ids = [row[0] for row in doc_result.all()]
+
     # Run the agent
-    final_state = await run_agent(query, neutral_alpha, neutral_beta)
+    final_state = await run_agent(query, neutral_alpha, neutral_beta, document_ids=active_doc_ids)
 
     query_type = final_state["query_type"]
     bandit = bandits.get(query_type, bandits["factual"])
@@ -366,10 +370,27 @@ async def delete_document(doc_id: int, db: AsyncSession = Depends(get_db)):
     
     # Delete from Qdrant using the unified document_id
     delete_by_document_id(doc.id)
+    # Also delete by source as a backup (important for legacy data)
+    delete_by_source(doc.source)
     
     await db.delete(doc)
     await db.commit()
     return {"message": "Document deleted successfully"}
+
+
+@router.post("/documents/wipe")
+async def wipe_all_documents(db: AsyncSession = Depends(get_db)):
+    """Wipe all documents from the database and all embeddings from Qdrant."""
+    from sqlalchemy import delete
+    
+    # 1. Clear database
+    await db.execute(delete(Document))
+    await db.commit()
+    
+    # 2. Clear Qdrant collection
+    wipe_all_embeddings()
+    
+    return {"message": "All database records and vector embeddings have been wiped."}
 
 
 # ──────────────────────────────────────────────────────────────────────────────

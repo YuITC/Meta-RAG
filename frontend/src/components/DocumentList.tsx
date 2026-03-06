@@ -1,7 +1,12 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { fetchDocuments, DocumentRead, deleteDocument } from "@/lib/api";
+import {
+  fetchDocuments,
+  DocumentRead,
+  deleteDocument,
+  wipeAllDocuments,
+} from "@/lib/api";
 
 export default function DocumentList({
   refreshTicker,
@@ -12,6 +17,7 @@ export default function DocumentList({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<number | null>(null);
+  const [isWiping, setIsWiping] = useState(false);
 
   const loadDocs = async () => {
     try {
@@ -44,6 +50,25 @@ export default function DocumentList({
     }
   };
 
+  const handleWipeAll = async () => {
+    if (
+      !confirm(
+        "CRITICAL: This will delete ALL documents from the database and WIPE the entire vector collection. Are you absolutely sure?",
+      )
+    )
+      return;
+
+    setIsWiping(true);
+    try {
+      await wipeAllDocuments();
+      setDocuments([]);
+    } catch (err) {
+      alert("Failed to wipe documents");
+    } finally {
+      setIsWiping(false);
+    }
+  };
+
   useEffect(() => {
     loadDocs();
     // Poll for status updates if any document is processing
@@ -66,9 +91,23 @@ export default function DocumentList({
     <div className="document-list-container">
       <div className="list-header">
         <span className="label">Documents in system</span>
-        <button className="btn-refresh" onClick={loadDocs} title="Refresh list">
-          refresh
-        </button>
+        <div className="header-actions">
+          <button
+            className="btn-wipe"
+            onClick={handleWipeAll}
+            disabled={isWiping || documents.length === 0}
+            title="Wipe ALL data"
+          >
+            {isWiping ? "wiping..." : "wipe all"}
+          </button>
+          <button
+            className="btn-refresh"
+            onClick={loadDocs}
+            title="Refresh list"
+          >
+            refresh
+          </button>
+        </div>
       </div>
 
       {error && <div className="error-small">{error}</div>}
@@ -129,11 +168,35 @@ export default function DocumentList({
           align-items: center;
           margin-bottom: 12px;
         }
+        .header-actions {
+          display: flex;
+          gap: 12px;
+          align-items: center;
+        }
         .label {
           color: var(--muted-fg);
           font-size: 11px;
           text-transform: uppercase;
           letter-spacing: 0.08em;
+        }
+        .btn-wipe {
+          background: none;
+          border: none;
+          color: var(--danger);
+          font-size: 11px;
+          cursor: pointer;
+          font-family: inherit;
+          text-transform: uppercase;
+          letter-spacing: 0.05em;
+          opacity: 0.7;
+        }
+        .btn-wipe:hover:not(:disabled) {
+          opacity: 1;
+          text-decoration: underline;
+        }
+        .btn-wipe:disabled {
+          opacity: 0.3;
+          cursor: not-allowed;
         }
         .btn-refresh {
           background: none;

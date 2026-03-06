@@ -143,6 +143,15 @@ export async function ingestSelectedPapers(
   return res.json();
 }
 
+export async function wipeAllDocuments(): Promise<{ message: string }> {
+  const res = await fetch(`${API_URL}/api/documents/wipe`, { method: "POST" });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(err.detail ?? "Wipe failed");
+  }
+  return res.json();
+}
+
 export async function checkHealth(): Promise<{
   status: string;
   qdrant: boolean;

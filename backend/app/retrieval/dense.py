@@ -73,14 +73,31 @@ def upsert_chunks(chunks: list[dict], document_id: int | None = None) -> None:
         )
 
 
-def dense_search(query: str, top_k: int = 5) -> list[dict]:
+def dense_search(query: str, top_k: int = 5, document_ids: list[int] | None = None) -> list[dict]:
     ensure_collection()
+    
+    # If a filter is requested but no IDs provided, return empty
+    if document_ids is not None and len(document_ids) == 0:
+        return []
+
     client = get_qdrant_client()
     q_vec = embed([query])[0]
+    
+    # Filtering to ensure we only retrieve from existing documents
+    search_filter = None
+    if document_ids is not None:
+        from qdrant_client.models import FieldCondition, Filter, MatchAny
+        search_filter = Filter(
+            must=[
+                FieldCondition(key="document_id", match=MatchAny(any=document_ids)),
+            ]
+        )
+
     response = client.query_points(
         collection_name=settings.qdrant_collection,
         query=q_vec,
         limit=top_k,
+        filter=search_filter,
         with_payload=True,
     )
     return [
@@ -114,3 +131,26 @@ def delete_by_document_id(document_id: int) -> None:
             ]
         ),
     )
+
+
+def delete_by_source(source: str) -> None:
+    """Delete all points associated with a specific source string (legacy/backup)."""
+    ensure_collection()
+    client = get_qdrant_client()
+    from qdrant_client.models import FieldCondition, Filter, MatchValue
+
+    client.delete(
+        collection_name=settings.qdrant_collection,
+        points_selector=Filter(
+            must=[
+                FieldCondition(key="source", match=MatchValue(value=source)),
+            ]
+        ),
+    )
+
+
+def wipe_all_embeddings() -> None:
+    """Completely clear the research_papers collection."""
+    client = get_qdrant_client()
+    client.delete_collection(collection_name=settings.qdrant_collection)
+    ensure_collection()

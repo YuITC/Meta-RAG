@@ -36,7 +36,12 @@ def build_bm25_index() -> None:
         return
 
     _corpus = [
-        {"id": d.id, "text": d.payload["text"], "source": d.payload["source"]}
+        {
+            "id": d.id, 
+            "text": d.payload["text"], 
+            "source": d.payload["source"],
+            "document_id": d.payload.get("document_id")
+        }
         for d in docs
     ]
     tokenized = [_tokenize(d["text"]) for d in _corpus]
@@ -50,7 +55,7 @@ def invalidate_index() -> None:
     _corpus = None
 
 
-def bm25_search(query: str, top_k: int = 5) -> list[dict]:
+def bm25_search(query: str, top_k: int = 5, document_ids: list[int] | None = None) -> list[dict]:
     if _bm25 is None or _corpus is None:
         build_bm25_index()
 
@@ -59,16 +64,20 @@ def bm25_search(query: str, top_k: int = 5) -> list[dict]:
 
     tokens = _tokenize(query)
     scores = _bm25.get_scores(tokens)
-    top_indices = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[
-        :top_k
-    ]
-    return [
-        {
-            "id": _corpus[i]["id"],
-            "text": _corpus[i]["text"],
-            "source": _corpus[i]["source"],
-            "score": float(scores[i]),
-        }
-        for i in top_indices
-        if scores[i] > 0
-    ]
+    
+    # Filter results by document_ids if provided
+    scored_items = []
+    for i, score in enumerate(scores):
+        if score > 0:
+            doc = _corpus[i]
+            if document_ids is not None and doc.get("document_id") not in document_ids:
+                continue
+            scored_items.append({
+                "id": doc["id"],
+                "text": doc["text"],
+                "source": doc["source"],
+                "score": float(score),
+            })
+            
+    scored_items.sort(key=lambda x: x["score"], reverse=True)
+    return scored_items[:top_k]
