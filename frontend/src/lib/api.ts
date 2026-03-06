@@ -1,5 +1,4 @@
-const API_URL =
-  process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
 export interface CitedChunk {
   index: number;
@@ -48,7 +47,9 @@ export async function submitQuery(query: string): Promise<QueryResponse> {
   return res.json();
 }
 
-export async function uploadDocument(file: File): Promise<{ message: string; chunks_indexed: number }> {
+export async function uploadDocument(
+  file: File,
+): Promise<{ message: string; chunks_indexed: number }> {
   const form = new FormData();
   form.append("file", file);
   const res = await fetch(`${API_URL}/api/ingest`, {
@@ -62,7 +63,10 @@ export async function uploadDocument(file: File): Promise<{ message: string; chu
   return res.json();
 }
 
-export async function scrapeHuggingFace(): Promise<{ message: string; chunks_indexed: number }> {
+export async function scrapeHuggingFace(): Promise<{
+  message: string;
+  chunks_indexed: number;
+}> {
   const res = await fetch(`${API_URL}/api/ingest/scrape`, { method: "POST" });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: res.statusText }));
@@ -77,7 +81,28 @@ export async function fetchBanditStats(): Promise<BanditStats[]> {
   return res.json();
 }
 
-export async function checkHealth(): Promise<{ status: string; qdrant: boolean; database: boolean }> {
+export interface DocumentRead {
+  id: number;
+  filename: string;
+  source: string;
+  status: "processing" | "indexed" | "failed";
+  chunks_count: number;
+  error_message: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export async function fetchDocuments(): Promise<DocumentRead[]> {
+  const res = await fetch(`${API_URL}/api/documents`);
+  if (!res.ok) throw new Error("Failed to fetch documents");
+  return res.json();
+}
+
+export async function checkHealth(): Promise<{
+  status: string;
+  qdrant: boolean;
+  database: boolean;
+}> {
   const res = await fetch(`${API_URL}/api/health`);
   if (!res.ok) throw new Error("Health check failed");
   return res.json();

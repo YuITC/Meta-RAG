@@ -1,16 +1,19 @@
 import re
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.graph import run_agent
 from app.database import get_db
 from app.ingestion.pipeline import ingest_document, ingest_text_chunks
 from app.memory.strategy_memory import load_bandit, log_run, save_bandit
+from app.models.db_models import Document
 from app.models.schemas import (
     BanditStats,
     CitedChunk,
     ConfigStats,
+    DocumentRead,
     DocumentUploadResponse,
     HealthResponse,
     QueryRequest,
@@ -163,11 +166,27 @@ def _extract_citations(answer: str, docs: list[dict]) -> list[CitedChunk]:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Documents
+# ──────────────────────────────────────────────────────────────────────────────
+
+@router.get("/documents", response_model=list[DocumentRead])
+async def get_documents(db: AsyncSession = Depends(get_db)):
+    """List all documents in the system."""
+    result = await db.execute(select(Document).order_by(Document.created_at.desc()))
+    docs = result.scalars().all()
+    return docs
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Document upload
 # ──────────────────────────────────────────────────────────────────────────────
 
 @router.post("/ingest", response_model=DocumentUploadResponse)
-async def ingest_endpoint(file: UploadFile = File(...)):
+async def ingest_endpoint(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db)
+):
     import os
 
     ext = os.path.splitext(file.filename or "")[1].lower()
@@ -181,37 +200,91 @@ async def ingest_endpoint(file: UploadFile = File(...)):
     if len(content) > 50 * 1024 * 1024:  # 50 MB cap
         raise HTTPException(status_code=413, detail="File too large (max 50 MB).")
 
-    count = ingest_document(file.filename, content)
+    # Create document record
+    doc = Document(
+        filename=file.filename,
+        source=file.filename,
+        status="processing"
+    )
+    db.add(doc)
+    await db.commit()
+    await db.refresh(doc)
+
+    async def run_ingestion(doc_id: int, filename: str, file_content: bytes):
+        from app.database import async_session_factory
+        async with async_session_factory() as session:
+            try:
+                count = ingest_document(filename, file_content)
+                db_doc = await session.get(Document, doc_id)
+                if db_doc:
+                    db_doc.status = "indexed"
+                    db_doc.chunks_count = count
+                    await session.commit()
+            except Exception as e:
+                db_doc = await session.get(Document, doc_id)
+                if db_doc:
+                    db_doc.status = "failed"
+                    db_doc.error_message = str(e)
+                    await session.commit()
+
+    background_tasks.add_task(run_ingestion, doc.id, file.filename, content)
+
     return DocumentUploadResponse(
-        message=f"Indexed {count} chunks from '{file.filename}'.",
-        chunks_indexed=count,
+        message=f"Upload started for '{file.filename}'. It will be processed in the background.",
+        chunks_indexed=0,
     )
 
 
 @router.post("/ingest/scrape", response_model=DocumentUploadResponse)
-async def ingest_scrape_endpoint():
+async def ingest_scrape_endpoint(
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db)
+):
     """Scrape trending HuggingFace papers and ingest abstracts."""
-    from app.ingestion.pipeline import ingest_text_chunks
+    
+    # Create a placeholder record for the scrape job
+    doc = Document(
+        filename="HuggingFace Trending Scrape",
+        source="huggingface",
+        status="processing"
+    )
+    db.add(doc)
+    await db.commit()
+    await db.refresh(doc)
 
-    try:
+    async def run_scrape(doc_id: int):
+        from app.database import async_session_factory
         from scraper.scraper import fetchTrendingPapers
-        papers = fetchTrendingPapers()
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Scraper failed: {e}")
+        async with async_session_factory() as session:
+            try:
+                papers = fetchTrendingPapers()
+                total = 0
+                for paper in papers:
+                    text = f"Title: {paper['title']}\n\nAbstract: {paper['abstract']}"
+                    if paper.get("author"):
+                        text += f"\n\nAuthor: {paper['author']}"
+                    if paper.get("published"):
+                        text += f"\nPublished: {paper['published']}"
+                    source = paper.get("url") or paper["title"]
+                    total += ingest_text_chunks(source, [text])
+                
+                db_doc = await session.get(Document, doc_id)
+                if db_doc:
+                    db_doc.status = "indexed"
+                    db_doc.chunks_count = total
+                    await session.commit()
+            except Exception as e:
+                db_doc = await session.get(Document, doc_id)
+                if db_doc:
+                    db_doc.status = "failed"
+                    db_doc.error_message = str(e)
+                    await session.commit()
 
-    total = 0
-    for paper in papers:
-        text = f"Title: {paper['title']}\n\nAbstract: {paper['abstract']}"
-        if paper.get("author"):
-            text += f"\n\nAuthor: {paper['author']}"
-        if paper.get("published"):
-            text += f"\nPublished: {paper['published']}"
-        source = paper.get("url") or paper["title"]
-        total += ingest_text_chunks(source, [text])
+    background_tasks.add_task(run_scrape, doc.id)
 
     return DocumentUploadResponse(
-        message=f"Scraped and indexed {total} paper entries from HuggingFace trending.",
-        chunks_indexed=total,
+        message="Scrape job started. HuggingFace trending papers are being indexed in the background.",
+        chunks_indexed=0,
     )
 
 

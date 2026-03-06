@@ -5,10 +5,15 @@ import { uploadDocument, scrapeHuggingFace } from "@/lib/api";
 
 interface QueryFormProps {
   onSubmit: (query: string) => void;
+  onSourceUpdated?: () => void;
   loading: boolean;
 }
 
-export default function QueryForm({ onSubmit, loading }: QueryFormProps) {
+export default function QueryForm({
+  onSubmit,
+  onSourceUpdated,
+  loading,
+}: QueryFormProps) {
   const [query, setQuery] = useState("");
   const [uploadMsg, setUploadMsg] = useState<string | null>(null);
   const [uploadErr, setUploadErr] = useState<string | null>(null);
@@ -28,6 +33,7 @@ export default function QueryForm({ onSubmit, loading }: QueryFormProps) {
     try {
       const result = await uploadDocument(file);
       setUploadMsg(`${result.message}`);
+      if (onSourceUpdated) onSourceUpdated();
     } catch (err: unknown) {
       setUploadErr(err instanceof Error ? err.message : "Upload failed");
     }
@@ -41,6 +47,7 @@ export default function QueryForm({ onSubmit, loading }: QueryFormProps) {
     try {
       const result = await scrapeHuggingFace();
       setUploadMsg(result.message);
+      if (onSourceUpdated) onSourceUpdated();
     } catch (err: unknown) {
       setUploadErr(err instanceof Error ? err.message : "Scrape failed");
     } finally {
@@ -53,7 +60,10 @@ export default function QueryForm({ onSubmit, loading }: QueryFormProps) {
       {/* Document sources */}
       <div className="source-bar">
         <span className="label">data sources</span>
-        <label className="btn-ghost" title="Upload a document (PDF, DOCX, HTML, MD, TXT)">
+        <label
+          className="btn-ghost"
+          title="Upload a document (PDF, DOCX, HTML, MD, TXT)"
+        >
           <input
             ref={fileRef}
             type="file"
@@ -86,7 +96,11 @@ export default function QueryForm({ onSubmit, loading }: QueryFormProps) {
           disabled={loading}
           autoFocus
         />
-        <button type="submit" className="btn-primary" disabled={loading || !query.trim()}>
+        <button
+          type="submit"
+          className="btn-primary"
+          disabled={loading || !query.trim()}
+        >
           {loading ? "thinking..." : "run"}
         </button>
       </form>
@@ -118,7 +132,9 @@ export default function QueryForm({ onSubmit, loading }: QueryFormProps) {
           font-size: 12px;
           cursor: pointer;
           font-family: inherit;
-          transition: border-color 0.15s, color 0.15s;
+          transition:
+            border-color 0.15s,
+            color 0.15s;
         }
         .btn-ghost:hover:not(:disabled) {
           border-color: var(--accent);

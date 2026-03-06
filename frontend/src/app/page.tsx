@@ -3,6 +3,7 @@
 import { useState, useEffect } from "react";
 import QueryForm from "@/components/QueryForm";
 import ResultDisplay from "@/components/ResultDisplay";
+import DocumentList from "@/components/DocumentList";
 import { submitQuery, fetchBanditStats, checkHealth } from "@/lib/api";
 import type { QueryResponse, BanditStats } from "@/lib/api";
 
@@ -16,7 +17,11 @@ export default function HomePage() {
   const [lastQuery, setLastQuery] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [banditStats, setBanditStats] = useState<BanditStats[]>([]);
-  const [health, setHealth] = useState<{ qdrant: boolean; database: boolean } | null>(null);
+  const [health, setHealth] = useState<{
+    qdrant: boolean;
+    database: boolean;
+  } | null>(null);
+  const [docRefreshTicker, setDocRefreshTicker] = useState(0);
 
   // Health check + bandit stats on mount
   useEffect(() => {
@@ -39,7 +44,9 @@ export default function HomePage() {
       setResult(res);
       setStatus("done");
       // Refresh bandit stats after each query
-      fetchBanditStats().then(setBanditStats).catch(() => {});
+      fetchBanditStats()
+        .then(setBanditStats)
+        .catch(() => {});
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Unknown error");
       setStatus("error");
@@ -59,7 +66,10 @@ export default function HomePage() {
             <div className="health">
               <span className={`dot ${health.qdrant ? "green" : "red"}`} />
               qdrant
-              <span className={`dot ${health.database ? "green" : "red"}`} style={{ marginLeft: 10 }} />
+              <span
+                className={`dot ${health.database ? "green" : "red"}`}
+                style={{ marginLeft: 10 }}
+              />
               postgres
             </div>
           )}
@@ -68,7 +78,14 @@ export default function HomePage() {
 
       <div className="container">
         {/* Query form */}
-        <QueryForm onSubmit={handleQuery} loading={status === "running"} />
+        <QueryForm
+          onSubmit={handleQuery}
+          onSourceUpdated={() => setDocRefreshTicker((prev) => prev + 1)}
+          loading={status === "running"}
+        />
+
+        {/* Document List */}
+        <DocumentList refreshTicker={docRefreshTicker} />
 
         {/* Running indicator */}
         {status === "running" && (
@@ -91,7 +108,9 @@ export default function HomePage() {
         {/* Bandit stats */}
         {banditStats.length > 0 && (
           <section className="bandit-section">
-            <div className="section-title">bandit state — thompson sampling posteriors</div>
+            <div className="section-title">
+              bandit state — thompson sampling posteriors
+            </div>
             <div className="bandit-grid">
               {banditStats.map((bs) => (
                 <div key={bs.query_type} className="bandit-card">
@@ -112,7 +131,14 @@ export default function HomePage() {
                           <td className="cfg">{cfg}</td>
                           <td>{stats.alpha.toFixed(1)}</td>
                           <td>{stats.beta.toFixed(1)}</td>
-                          <td style={{ color: stats.win_rate > 0.6 ? "var(--success)" : "inherit" }}>
+                          <td
+                            style={{
+                              color:
+                                stats.win_rate > 0.6
+                                  ? "var(--success)"
+                                  : "inherit",
+                            }}
+                          >
                             {(stats.win_rate * 100).toFixed(1)}%
                           </td>
                           <td>{stats.trials}</td>
@@ -154,7 +180,11 @@ export default function HomePage() {
           font-size: 12px;
           color: var(--muted-fg);
         }
-        .header-right { display: flex; align-items: center; gap: 8px; }
+        .header-right {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+        }
         .health {
           display: flex;
           align-items: center;
@@ -168,8 +198,12 @@ export default function HomePage() {
           height: 6px;
           border-radius: 50%;
         }
-        .dot.green { background: var(--success); }
-        .dot.red { background: var(--danger); }
+        .dot.green {
+          background: var(--success);
+        }
+        .dot.red {
+          background: var(--danger);
+        }
         .container {
           max-width: 900px;
           margin: 0 auto;
@@ -191,7 +225,11 @@ export default function HomePage() {
           border-radius: 50%;
           animation: spin 0.8s linear infinite;
         }
-        @keyframes spin { to { transform: rotate(360deg); } }
+        @keyframes spin {
+          to {
+            transform: rotate(360deg);
+          }
+        }
         .error-box {
           margin-top: 20px;
           border: 1px solid var(--danger);
@@ -248,8 +286,13 @@ export default function HomePage() {
           padding: 6px 12px;
           border-bottom: 1px solid #1a1a1c;
         }
-        .bandit-table tr:last-child td { border-bottom: none; }
-        .cfg { color: var(--accent); font-weight: 600; }
+        .bandit-table tr:last-child td {
+          border-bottom: none;
+        }
+        .cfg {
+          color: var(--accent);
+          font-weight: 600;
+        }
       `}</style>
     </main>
   );

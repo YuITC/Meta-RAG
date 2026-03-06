@@ -1,3 +1,4 @@
+from datetime import datetime
 from pydantic import BaseModel
 
 
@@ -48,3 +49,14 @@ class HealthResponse(BaseModel):
     status: str
     qdrant: bool
     database: bool
+
+
+class DocumentRead(BaseModel):
+    id: int
+    filename: str
+    source: str
+    status: str
+    chunks_count: int
+    error_message: str | None
+    created_at: datetime
+    updated_at: datetime
