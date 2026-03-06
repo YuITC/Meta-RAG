@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.env
+dist/
+build/
+*.egg
+
+# uv
+.python-version
+uv.lock
+
+# Data
+backend/data/
+*.db
+
+# Models cache
+.cache/
+huggingface/
+
+# Node
+node_modules/
+.next/
+frontend/.env.local
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
