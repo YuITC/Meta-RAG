@@ -17,10 +17,15 @@ def test_bm25_tokenize():
 
 def test_bm25_returns_empty_on_no_index(monkeypatch):
     import app.retrieval.bm25_retrieval as bm25_mod
+    from rank_bm25 import BM25Okapi
 
-    # Force empty corpus
+    # Force empty corpus and a no-op index rebuild
     monkeypatch.setattr(bm25_mod, "_bm25", None)
-    monkeypatch.setattr(bm25_mod, "_corpus", [])
+    monkeypatch.setattr(bm25_mod, "_corpus", None)
+    monkeypatch.setattr(bm25_mod, "build_bm25_index", lambda: (
+        setattr(bm25_mod, "_bm25", None),
+        setattr(bm25_mod, "_corpus", []),
+    ))
 
     results = bm25_mod.bm25_search("anything", top_k=5)
     assert results == []
@@ -62,8 +67,8 @@ def test_hybrid_deduplicates(monkeypatch):
 
     doc = {"id": 42, "text": "shared doc", "source": "x.pdf", "score": 0.9}
 
-    monkeypatch.setattr(hybrid, "dense_search", lambda q, top_k: [doc])
-    monkeypatch.setattr(hybrid, "bm25_search", lambda q, top_k: [doc])
+    monkeypatch.setattr(hybrid, "dense_search", lambda q, top_k, document_ids=None: [doc])
+    monkeypatch.setattr(hybrid, "bm25_search", lambda q, top_k, document_ids=None: [doc])
 
     results = hybrid.hybrid_search("test", top_k=5)
     # Same doc should appear only once
@@ -82,8 +87,8 @@ def test_hybrid_fuses_scores(monkeypatch):
         {"id": 2, "text": "doc two", "source": "b", "score": 5.0},
         {"id": 3, "text": "doc three", "source": "c", "score": 4.0},
     ]
-    monkeypatch.setattr(hybrid, "dense_search", lambda q, top_k: dense_docs)
-    monkeypatch.setattr(hybrid, "bm25_search", lambda q, top_k: bm25_docs)
+    monkeypatch.setattr(hybrid, "dense_search", lambda q, top_k, document_ids=None: dense_docs)
+    monkeypatch.setattr(hybrid, "bm25_search", lambda q, top_k, document_ids=None: bm25_docs)
 
     results = hybrid.hybrid_search("test", top_k=5)
     # doc 2 appears in both sources so should rank highly

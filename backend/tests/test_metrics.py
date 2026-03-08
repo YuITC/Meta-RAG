@@ -108,7 +108,7 @@ def test_bandit_converges_to_better_config():
         bandit.update("A", 0.9)
         bandit.update("C", 0.2)
 
-    counts = {"A": 0, "B": 0, "C": 0}
+    counts = {"A": 0, "B": 0, "C": 0, "D": 0}
     for _ in range(100):
         counts[bandit.select_config()] += 1
 

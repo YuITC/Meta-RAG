@@ -3,7 +3,6 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        # Tìm file .env ở thư mục hiện tại hoặc thư mục cha
         env_file=(".env", "../.env"),
         env_file_encoding="utf-8", 
         extra="ignore"
@@ -32,6 +31,18 @@ class Settings(BaseSettings):
 
     # Constraints
     max_latency_seconds: float = 15.0
+
+    # Retrieval intelligence / control
+    default_rewrite_count: int = 4
+    evidence_coverage_threshold: float = 0.45
+    min_retrieval_diversity: float = 0.25
+    evaluator_confidence_threshold: float = 0.4
+
+    # Multi-metric reward weights
+    reward_w1_faithfulness: float = 0.45
+    reward_w2_citation_precision: float = 0.3
+    reward_w3_answer_completeness: float = 0.2
+    reward_w4_latency_penalty: float = 0.15
 
 
 settings = Settings()

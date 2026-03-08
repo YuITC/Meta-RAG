@@ -1,10 +1,13 @@
 """Scraper for Hugging Face trending papers."""
 
+import logging
 from typing import TypedDict
 
 import requests
 from bs4 import BeautifulSoup
 from lxml import etree
+
+logger = logging.getLogger(__name__)
 
 
 class Paper(TypedDict):
@@ -134,7 +137,7 @@ def fetchTrendingPapers() -> list[Paper]:
 
         except Exception as e:
             # Ignore errors when retrieving individual articles and continue
-            print(f"Warning: Failed to parse article {article_num}: {e}")
+            logger.warning("Failed to parse article %d: %s", article_num, e)
             continue
 
     return papers

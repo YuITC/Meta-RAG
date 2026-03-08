@@ -3,7 +3,7 @@ from datetime import datetime
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.db_models import BanditState, RunLog
+from app.models.db_models import BanditState, RetrievalDiagnostic, RunLog
 from app.optimization.bandit import ThompsonSamplingBandit
 
 
@@ -63,6 +63,26 @@ async def log_run(
         latency=latency,
         utility=utility,
         is_retry=is_retry,
+    )
+    db.add(entry)
+    await db.commit()
+
+
+async def log_retrieval_diagnostics(
+    db: AsyncSession,
+    query: str,
+    query_type: str,
+    config_name: str,
+    diagnostics: dict[str, float],
+) -> None:
+    entry = RetrievalDiagnostic(
+        query=query,
+        query_type=query_type,
+        config_name=config_name,
+        query_coverage=float(diagnostics.get("query_coverage", 0.0)),
+        document_diversity=float(diagnostics.get("document_diversity", 0.0)),
+        retrieval_redundancy=float(diagnostics.get("retrieval_redundancy", 0.0)),
+        estimated_recall_proxy=float(diagnostics.get("estimated_recall_proxy", 0.0)),
     )
     db.add(entry)
     await db.commit()

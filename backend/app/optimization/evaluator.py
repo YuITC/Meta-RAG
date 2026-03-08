@@ -20,10 +20,14 @@ def get_llm() -> ChatGoogleGenerativeAI:
     return _llm
 
 
-EVAL_PROMPT = """\
-Given the answer and retrieved context below, score the faithfulness from 0.0 to 1.0.
+MULTI_EVAL_PROMPT = """\
+Given the answer and retrieved context below, score the following metrics from 0.0 to 1.0:
+- faithfulness: fraction of statements supported by context
+- answer_completeness: how fully the answer addresses the query
+- confidence: confidence in the evaluation itself
 
-Faithfulness = fraction of answer statements supported by context.
+Query:
+{query}
 
 Context:
 {context}
@@ -32,15 +36,16 @@ Answer:
 {answer}
 
 Respond with JSON only:
-{{"faithfulness": <float 0.0-1.0>, "reasoning": "<brief explanation>"}}"""
+{{"faithfulness": <float>, "answer_completeness": <float>, "confidence": <float>, "reasoning": "<brief explanation>"}}"""
 
 
-async def evaluate_faithfulness(answer: str, context: str) -> dict:
-    """
-    Returns {"faithfulness": float, "reasoning": str}
-    Uses a single LLM call (not full RAGAS — reserved for offline evaluation).
-    """
-    prompt = EVAL_PROMPT.format(context=context[:3000], answer=answer[:2000])
+async def evaluate_answer(query: str, answer: str, context: str) -> dict:
+    """Multi-metric runtime evaluation with a single LLM call."""
+    prompt = MULTI_EVAL_PROMPT.format(
+        query=query[:800],
+        context=context[:3000],
+        answer=answer[:2200],
+    )
     llm = get_llm()
     try:
         response = await llm.ainvoke([HumanMessage(content=prompt)])
@@ -48,8 +53,17 @@ async def evaluate_faithfulness(answer: str, context: str) -> dict:
         match = re.search(r"\{.*\}", text, re.DOTALL)
         if match:
             result = json.loads(match.group())
-            result["faithfulness"] = max(0.0, min(1.0, float(result.get("faithfulness", 0.5))))
-            return result
+            return {
+                "faithfulness": max(0.0, min(1.0, float(result.get("faithfulness", 0.5)))),
+                "answer_completeness": max(0.0, min(1.0, float(result.get("answer_completeness", 0.5)))),
+                "confidence": max(0.0, min(1.0, float(result.get("confidence", 0.5)))),
+                "reasoning": str(result.get("reasoning", "")),
+            }
     except Exception:
         pass
-    return {"faithfulness": 0.5, "reasoning": "evaluation unavailable"}
+    return {
+        "faithfulness": 0.5,
+        "answer_completeness": 0.5,
+        "confidence": 0.4,
+        "reasoning": "evaluation unavailable",
+    }

@@ -47,3 +47,17 @@ class Document(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
     )
+
+
+class RetrievalDiagnostic(Base):
+    __tablename__ = "retrieval_diagnostics"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    query: Mapped[str] = mapped_column(String)
+    query_type: Mapped[str] = mapped_column(String)
+    config_name: Mapped[str] = mapped_column(String)
+    query_coverage: Mapped[float] = mapped_column(Float, default=0.0)
+    document_diversity: Mapped[float] = mapped_column(Float, default=0.0)
+    retrieval_redundancy: Mapped[float] = mapped_column(Float, default=0.0)
+    estimated_recall_proxy: Mapped[float] = mapped_column(Float, default=0.0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)

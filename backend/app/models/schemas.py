@@ -1,5 +1,5 @@
 from datetime import datetime
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class QueryRequest(BaseModel):
@@ -14,18 +14,23 @@ class CitedChunk(BaseModel):
 
 class RunMetrics(BaseModel):
     faithfulness: float
+    citation_precision: float = 0.0
+    unsupported_claim_rate: float = 1.0
+    answer_completeness: float = 0.0
     cost: float
     latency: float
     utility: float
     config: str
     query_type: str
     hops: int
+    retrieval_diagnostics: dict[str, float] = Field(default_factory=dict)
 
 
 class QueryResponse(BaseModel):
     answer: str
     citations: list[CitedChunk]
     metrics: RunMetrics
+    abstained: bool = False
 
 
 class DocumentUploadResponse(BaseModel):

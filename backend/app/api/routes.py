@@ -1,13 +1,16 @@
+import json
 import re
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile
-from sqlalchemy import select
+from fastapi.responses import StreamingResponse
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.agent.graph import run_agent
+from app.agent.graph import build_initial_state, run_agent, stream_agent_updates
+from app.agent.planner import classify_rule_based
 from app.database import get_db
 from app.ingestion.pipeline import ingest_document, ingest_text_chunks
-from app.memory.strategy_memory import load_bandit, log_run, save_bandit
+from app.memory.strategy_memory import load_bandit, log_retrieval_diagnostics, log_run, save_bandit
 from app.models.db_models import Document
 from app.models.schemas import (
     BanditStats,
@@ -22,7 +25,7 @@ from app.models.schemas import (
     QueryResponse,
     RunMetrics,
 )
-from app.optimization.bandit import compute_utility
+from app.optimization.bandit import CONFIG_NAMES, compute_reward, compute_utility
 from app.retrieval.dense import delete_by_document_id, delete_by_source, wipe_all_embeddings
 
 router = APIRouter()
@@ -47,7 +50,7 @@ async def health(db: AsyncSession = Depends(get_db)):
         pass
 
     try:
-        await db.execute(__import__("sqlalchemy").text("SELECT 1"))
+        await db.execute(text("SELECT 1"))
         db_ok = True
     except Exception:
         pass
@@ -69,57 +72,143 @@ async def query_endpoint(body: QueryRequest, db: AsyncSession = Depends(get_db))
     if not query:
         raise HTTPException(status_code=400, detail="Query cannot be empty.")
 
-    # Load bandit — we don't know query_type yet; use a temp "unknown" type
-    # We'll reload after plan_node sets query_type. For now load all three.
-    # The bandit is keyed by query_type which is determined inside the agent.
-    # Strategy: run agent with default priors, then swap to the correct bandit.
-    # Better: pre-load all three bandits and inject their combined alpha/beta.
+    query_context = await _prepare_query_context(query, db)
 
-    # Load per-type bandits into a merged lookup
-    bandits = {}
+    # Run the agent with learned bandit priors
+    final_state = await run_agent(
+        query,
+        query_context["learned_alpha"],
+        query_context["learned_beta"],
+        document_ids=query_context["active_doc_ids"],
+    )
+
+    return await _finalize_query_response(
+        db=db,
+        query=query,
+        final_state=final_state,
+        bandits=query_context["bandits"],
+        predicted_type=query_context["predicted_type"],
+    )
+
+
+@router.post("/query/stream")
+async def query_stream_endpoint(body: QueryRequest, db: AsyncSession = Depends(get_db)):
+    query = body.query.strip()
+    if not query:
+        raise HTTPException(status_code=400, detail="Query cannot be empty.")
+
+    query_context = await _prepare_query_context(query, db)
+
+    async def event_generator():
+        current_state = build_initial_state(
+            query,
+            query_context["learned_alpha"],
+            query_context["learned_beta"],
+            document_ids=query_context["active_doc_ids"],
+        )
+
+        try:
+            async for update in stream_agent_updates(
+                query,
+                query_context["learned_alpha"],
+                query_context["learned_beta"],
+                document_ids=query_context["active_doc_ids"],
+            ):
+                for node_name, payload in update.items():
+                    previous_state = dict(current_state)
+                    current_state.update(payload)
+
+                    if node_name == "retry":
+                        yield _sse_event(
+                            {
+                                "type": "retrying",
+                                "details": {
+                                    "retry_count": current_state.get("retry_count", 0),
+                                    "previous_config": previous_state.get("current_config", ""),
+                                    "selected_config": current_state.get("current_config", ""),
+                                    "reason": "faithfulness below threshold",
+                                    "failed_faithfulness": previous_state.get("faithfulness", 0.0),
+                                },
+                            }
+                        )
+                        continue
+
+                    event = _build_stream_event(node_name, current_state)
+                    if event is not None:
+                        yield _sse_event(event)
+
+            response = await _finalize_query_response(
+                db=db,
+                query=query,
+                final_state=current_state,
+                bandits=query_context["bandits"],
+                predicted_type=query_context["predicted_type"],
+            )
+            yield _sse_event({"type": "query_complete", "response": response.model_dump()})
+        except Exception as exc:
+            yield _sse_event({"type": "query_error", "error": str(exc)})
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
+def _sse_event(payload: dict) -> str:
+    return f"data: {json.dumps(payload)}\n\n"
+
+
+async def _prepare_query_context(query: str, db: AsyncSession) -> dict:
+    # Pre-classify query type cheaply (rule-based, no LLM call) so we can
+    # load the *correct* bandit and inject learned priors into the agent.
+    predicted_type = classify_rule_based(query)
+    bandit = await load_bandit(db, predicted_type)
+
+    # Also pre-load the other bandits so we can switch after the agent
+    # confirms the real query_type (via its LLM planner).
+    bandits = {predicted_type: bandit}
     for qt in ("factual", "comparative", "multi_hop"):
-        bandits[qt] = await load_bandit(db, qt)
+        if qt != predicted_type:
+            bandits[qt] = await load_bandit(db, qt)
 
-    # Use a placeholder bandit for the initial config selection (factual is default)
-    # The graph's plan_node will set query_type; for the first config selection
-    # we pass a neutral Beta(1,1) — the correct bandit is applied after we know the type.
-    # This is a two-pass approach: plan first to get query_type, then select config.
-
-    # Pass a unified alpha/beta that the graph will use internally.
-    # We'll inject the correct bandit alpha/beta after knowing the query type.
-    # For simplicity: run with neutral priors, extract query_type, then re-run
-    # with the correct bandit. Instead, integrate bandit loading into the graph
-    # by using a post-plan hook.
-
-    # Practical solution: run agent with neutral priors, then load the correct
-    # bandit AFTER we know the query_type and use it to update.
-    neutral_alpha = {"A": 1.0, "B": 1.0, "C": 1.0}
-    neutral_beta = {"A": 1.0, "B": 1.0, "C": 1.0}
-
-    # Fetch active document IDs to prevent retrieving from deleted documents
     doc_result = await db.execute(select(Document.id))
     active_doc_ids = [row[0] for row in doc_result.all()]
 
-    # Run the agent
-    final_state = await run_agent(query, neutral_alpha, neutral_beta, document_ids=active_doc_ids)
+    return {
+        "predicted_type": predicted_type,
+        "bandits": bandits,
+        "learned_alpha": dict(bandit.alpha),
+        "learned_beta": dict(bandit.beta),
+        "active_doc_ids": active_doc_ids,
+    }
 
+
+async def _finalize_query_response(
+    db: AsyncSession,
+    query: str,
+    final_state: dict,
+    bandits: dict,
+    predicted_type: str,
+) -> QueryResponse:
     query_type = final_state["query_type"]
-    bandit = bandits.get(query_type, bandits["factual"])
+    bandit = bandits.get(query_type, bandits[predicted_type])
 
-    # Recompute config choice with correct bandit for config selection was already done
-    # We simply use the config_name from the agent's run.
     first_config = final_state["first_config"]
     final_config = final_state["current_config"]
 
     faithfulness = final_state["faithfulness"]
+    citation_precision = final_state.get("citation_precision", 0.0)
+    unsupported_claim_rate = final_state.get("unsupported_claim_rate", 1.0)
+    answer_completeness = final_state.get("answer_completeness", 0.0)
     cost = final_state["cost"]
     latency = final_state["latency"]
-    utility = final_state["utility"]
+    utility = compute_reward(
+        faithfulness=faithfulness,
+        citation_precision=citation_precision,
+        answer_completeness=answer_completeness,
+        latency=latency,
+    )
     retry_count = final_state["retry_count"]
+    retrieval_diagnostics = final_state.get("retrieval_diagnostics", {})
 
-    # Update bandit: if there was a retry, log both runs
     if retry_count > 0:
-        # First run failed — log with low utility
         fail_utility = compute_utility(faithfulness * 0.3, cost * 0.6, latency * 0.6)
         bandit.update(first_config, fail_utility)
         await log_run(
@@ -127,12 +216,12 @@ async def query_endpoint(body: QueryRequest, db: AsyncSession = Depends(get_db))
             faithfulness * 0.3, cost * 0.6, latency * 0.6, fail_utility,
             is_retry=False,
         )
-    # Log final run
+
     bandit.update(final_config, utility)
     await log_run(db, query, query_type, final_config, faithfulness, cost, latency, utility, is_retry=retry_count > 0)
+    await log_retrieval_diagnostics(db, query, query_type, final_config, retrieval_diagnostics)
     await save_bandit(db, query_type, bandit)
 
-    # Parse citations from answer
     docs = final_state["all_docs"]
     citations = _extract_citations(final_state["answer"], docs)
 
@@ -141,14 +230,117 @@ async def query_endpoint(body: QueryRequest, db: AsyncSession = Depends(get_db))
         citations=citations,
         metrics=RunMetrics(
             faithfulness=round(faithfulness, 4),
+            citation_precision=round(citation_precision, 4),
+            unsupported_claim_rate=round(unsupported_claim_rate, 4),
+            answer_completeness=round(answer_completeness, 4),
             cost=round(cost, 6),
             latency=round(latency, 2),
             utility=round(utility, 4),
             config=final_config,
             query_type=query_type,
             hops=final_state["hop"],
+            retrieval_diagnostics=retrieval_diagnostics,
         ),
+        abstained=final_state.get("abstained", False),
     )
+
+
+def _build_stream_event(node_name: str, state: dict) -> dict | None:
+    if node_name == "plan":
+        return {
+            "type": "step_completed",
+            "step": "planner",
+            "details": {
+                "query_type": state.get("query_type"),
+                "selected_config": state.get("current_config"),
+            },
+        }
+
+    if node_name == "query_rewrite":
+        return {
+            "type": "step_completed",
+            "step": "query_rewriting",
+            "details": {
+                "variants_generated": len(state.get("query_variants", [])),
+                "primary_query": (state.get("query_variants") or [state.get("current_query", "")])[0],
+            },
+        }
+
+    if node_name == "retrieve":
+        diagnostics = state.get("retrieval_diagnostics", {})
+        return {
+            "type": "step_completed",
+            "step": "retrieval",
+            "details": {
+                "documents_retrieved": len(state.get("all_docs", [])),
+                "query_coverage": diagnostics.get("query_coverage", 0.0),
+                "document_diversity": diagnostics.get("document_diversity", 0.0),
+            },
+        }
+
+    if node_name == "read":
+        return {
+            "type": "step_completed",
+            "step": "reader",
+            "details": {
+                "evidence_spans": len(state.get("evidence", [])),
+                "followup_query": state.get("followup_query") or "none",
+            },
+        }
+
+    if node_name == "controller":
+        diagnostics = state.get("retrieval_diagnostics", {})
+        return {
+            "type": "step_completed",
+            "step": "research_controller",
+            "details": {
+                "evidence_coverage": state.get("evidence_coverage", 0.0),
+                "recall_proxy": diagnostics.get("estimated_recall_proxy", 0.0),
+                "decision": state.get("controller_action", "stop"),
+            },
+        }
+
+    if node_name == "write":
+        return {
+            "type": "step_completed",
+            "step": "writer",
+            "details": {
+                "answer_length": len(state.get("answer", "")),
+                "abstained": state.get("abstained", False),
+            },
+        }
+
+    if node_name == "claim_extract":
+        return {
+            "type": "step_completed",
+            "step": "claim_extraction",
+            "details": {
+                "claims_extracted": len(state.get("claims", [])),
+            },
+        }
+
+    if node_name == "citation_verify":
+        return {
+            "type": "step_completed",
+            "step": "citation_verification",
+            "details": {
+                "citation_precision": state.get("citation_precision", 0.0),
+                "unsupported_claim_rate": state.get("unsupported_claim_rate", 0.0),
+            },
+        }
+
+    if node_name == "evaluate":
+        return {
+            "type": "step_completed",
+            "step": "evaluation",
+            "details": {
+                "faithfulness": state.get("faithfulness", 0.0),
+                "answer_completeness": state.get("answer_completeness", 0.0),
+                "confidence": state.get("evaluator_confidence", 0.0),
+            },
+        }
+
+    return None
 
 
 def _extract_citations(answer: str, docs: list[dict]) -> list[CitedChunk]:
@@ -362,7 +554,7 @@ async def ingest_selected_papers(
                                 if resp.status_code == 200:
                                     pdf_content = resp.content
                             except Exception as download_err:
-                                print(f"Failed to download PDF for {p['title']}: {download_err}")
+                                pass
 
                         if pdf_content:
                             # Ingest as full document (PDF)

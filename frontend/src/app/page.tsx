@@ -1,302 +1,233 @@
 "use client";
 
-import { useState, useEffect } from "react";
-import QueryForm from "@/components/QueryForm";
-import ResultDisplay from "@/components/ResultDisplay";
-import DocumentList from "@/components/DocumentList";
-import ThemeToggle from "@/components/ThemeToggle";
-import { submitQuery, fetchBanditStats, checkHealth } from "@/lib/api";
-import type { QueryResponse, BanditStats } from "@/lib/api";
+import { useEffect, useState } from "react";
+import { Header } from "@/components/header";
+import { QueryInput } from "@/components/query-input";
+import { PipelinePanel } from "@/components/pipeline-panel";
+import { ResultPanel } from "@/components/result-panel";
+import { EvidencePanel } from "@/components/evidence-panel";
+import { MetricsPanel } from "@/components/metrics-panel";
+import { BanditViewer } from "@/components/bandit-viewer";
+import { FileUpload } from "@/components/file-upload";
+import { HuggingFacePapers } from "@/components/huggingface-papers";
+import { DataSourceModal } from "@/components/data-source-modal";
 
-type Status = "idle" | "running" | "done" | "error";
+const CONFIG_SUMMARIES = [
+  {
+    name: "A",
+    description: "top_k 5 · 256 chunks · no rewrite · 1 hop",
+  },
+  {
+    name: "B",
+    description: "top_k 10 · template rewrite · 512 chunks",
+  },
+  {
+    name: "C",
+    description: "rerank on · 2 hops · 512 chunks",
+  },
+  {
+    name: "D",
+    description: "LLM rewrite · 2 hops · 5 variants",
+  },
+];
 
-const QUERY_TYPES = ["factual", "comparative", "multi_hop"] as const;
+export default function Home() {
+  const [isMobileViewport, setIsMobileViewport] = useState(false);
+  const [pipelineDrawerOpen, setPipelineDrawerOpen] = useState(false);
+  const [evidenceDrawerOpen, setEvidenceDrawerOpen] = useState(false);
+  const [metricsModalOpen, setMetricsModalOpen] = useState(false);
+  const [strategyModalOpen, setStrategyModalOpen] = useState(false);
+  const [documentsModalOpen, setDocumentsModalOpen] = useState(false);
+  const [papersModalOpen, setPapersModalOpen] = useState(false);
+  const [configsModalOpen, setConfigsModalOpen] = useState(false);
+  const [leftSidebarOpen, setLeftSidebarOpen] = useState(true);
+  const [rightSidebarOpen, setRightSidebarOpen] = useState(true);
 
-export default function HomePage() {
-  const [status, setStatus] = useState<Status>("idle");
-  const [result, setResult] = useState<QueryResponse | null>(null);
-  const [lastQuery, setLastQuery] = useState("");
-  const [error, setError] = useState<string | null>(null);
-  const [banditStats, setBanditStats] = useState<BanditStats[]>([]);
-  const [health, setHealth] = useState<{
-    qdrant: boolean;
-    database: boolean;
-  } | null>(null);
-  const [docRefreshTicker, setDocRefreshTicker] = useState(0);
-
-  // Health check + bandit stats on mount
   useEffect(() => {
-    checkHealth()
-      .then(setHealth)
-      .catch(() => setHealth({ qdrant: false, database: false }));
-    fetchBanditStats()
-      .then(setBanditStats)
-      .catch(() => {});
+    const handleResize = () => {
+      setIsMobileViewport(window.innerWidth < 1024);
+
+      if (window.innerWidth >= 1024) {
+        setPipelineDrawerOpen(false);
+        setEvidenceDrawerOpen(false);
+      }
+    };
+
+    handleResize();
+    window.addEventListener("resize", handleResize);
+    return () => window.removeEventListener("resize", handleResize);
   }, []);
 
-  const handleQuery = async (query: string) => {
-    setStatus("running");
-    setError(null);
-    setResult(null);
-    setLastQuery(query);
+  const isDesktopViewport = () =>
+    typeof window !== "undefined" && window.innerWidth >= 1024;
 
-    try {
-      const res = await submitQuery(query);
-      setResult(res);
-      setStatus("done");
-      // Refresh bandit stats after each query
-      fetchBanditStats()
-        .then(setBanditStats)
-        .catch(() => {});
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Unknown error");
-      setStatus("error");
+  const handleToggleLeftSidebar = () => {
+    if (isDesktopViewport()) {
+      setLeftSidebarOpen((open) => !open);
+      return;
     }
+
+    setPipelineDrawerOpen((open) => !open);
+  };
+
+  const handleToggleRightSidebar = () => {
+    if (isDesktopViewport()) {
+      setRightSidebarOpen((open) => !open);
+      return;
+    }
+
+    setEvidenceDrawerOpen((open) => !open);
   };
 
   return (
-    <main className="page">
+    <div className="flex h-screen flex-col bg-background">
       {/* Header */}
-      <header className="header">
-        <div className="header-left">
-          <span className="title">ara</span>
-          <span className="subtitle">autonomous research agent</span>
-        </div>
-        <div className="header-right">
-          {health && (
-            <div className="health">
-              <span className={`dot ${health.qdrant ? "green" : "red"}`} />
-              qdrant
-              <span
-                className={`dot ${health.database ? "green" : "red"}`}
-                style={{ marginLeft: 10 }}
-              />
-              postgres
-            </div>
-          )}
-          <ThemeToggle />
-        </div>
-      </header>
+      <Header
+        onOpenMetrics={() => setMetricsModalOpen(true)}
+        onOpenStrategyLearning={() => setStrategyModalOpen(true)}
+        onOpenDocuments={() => setDocumentsModalOpen(true)}
+        onOpenTrending={() => setPapersModalOpen(true)}
+        onOpenConfigs={() => setConfigsModalOpen(true)}
+        leftSidebarOpen={isMobileViewport ? pipelineDrawerOpen : leftSidebarOpen}
+        rightSidebarOpen={isMobileViewport ? evidenceDrawerOpen : rightSidebarOpen}
+        onToggleLeftSidebar={handleToggleLeftSidebar}
+        onToggleRightSidebar={handleToggleRightSidebar}
+      />
 
-      <div className="container">
-        {/* Query form */}
-        <QueryForm
-          onSubmit={handleQuery}
-          onSourceUpdated={() => setDocRefreshTicker((prev) => prev + 1)}
-          loading={status === "running"}
-        />
+      <div className="flex flex-1 overflow-hidden">
+        {/* Main content */}
+        <main className="flex flex-1 flex-col overflow-hidden">
+          {/* Content area: pipeline + metrics left, answer center, evidence right */}
+          <div className="flex flex-1 overflow-hidden">
+            {/* Left: Research Pipeline */}
+            {leftSidebarOpen && (
+              <div className="hidden min-w-0 basis-0 overflow-y-auto border-r bg-card/90 p-3 backdrop-blur-sm lg:block lg:flex-[1]">
+                <PipelinePanel />
+              </div>
+            )}
 
-        {/* Document List */}
-        <DocumentList refreshTicker={docRefreshTicker} />
-
-        {/* Running indicator */}
-        {status === "running" && (
-          <div className="running-indicator">
-            <div className="spinner" />
-            <span>plan → retrieve → read → write → evaluate</span>
-          </div>
-        )}
-
-        {/* Error */}
-        {status === "error" && error && (
-          <div className="error-box">error: {error}</div>
-        )}
-
-        {/* Result */}
-        {status === "done" && result && (
-          <ResultDisplay result={result} query={lastQuery} />
-        )}
-
-        {/* Bandit stats */}
-        {banditStats.length > 0 && (
-          <section className="bandit-section">
-            <div className="section-title">
-              bandit state — thompson sampling posteriors
-            </div>
-            <div className="bandit-grid">
-              {banditStats.map((bs) => (
-                <div key={bs.query_type} className="bandit-card">
-                  <div className="bandit-type">{bs.query_type}</div>
-                  <table className="bandit-table">
-                    <thead>
-                      <tr>
-                        <th>cfg</th>
-                        <th>α</th>
-                        <th>β</th>
-                        <th>win%</th>
-                        <th>n</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {Object.entries(bs.configs).map(([cfg, stats]) => (
-                        <tr key={cfg}>
-                          <td className="cfg">{cfg}</td>
-                          <td>{stats.alpha.toFixed(1)}</td>
-                          <td>{stats.beta.toFixed(1)}</td>
-                          <td
-                            style={{
-                              color:
-                                stats.win_rate > 0.6
-                                  ? "var(--success)"
-                                  : "inherit",
-                            }}
-                          >
-                            {(stats.win_rate * 100).toFixed(1)}%
-                          </td>
-                          <td>{stats.trials}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
+            {/* Center: Answer + Query Bar */}
+            <div className="min-w-0 basis-0 flex-[3] overflow-hidden">
+              <div className="flex h-full flex-col">
+                <div className="min-h-0 flex-1 overflow-y-auto p-3">
+                  <div className="mx-auto max-w-[68rem]">
+                    <div className="rounded-xl border bg-card shadow-[0_12px_28px_rgba(30,64,175,0.06)]">
+                      <ResultPanel />
+                    </div>
+                  </div>
                 </div>
-              ))}
+
+                <QueryInput
+                  onToggleEvidence={() => setEvidenceDrawerOpen((open) => !open)}
+                  evidenceOpen={evidenceDrawerOpen}
+                />
+              </div>
             </div>
-          </section>
-        )}
+
+            {/* Right: Evidence */}
+            {rightSidebarOpen && (
+              <div className="hidden min-w-0 basis-0 border-l bg-card/90 p-3 backdrop-blur-sm lg:block lg:flex-[1]">
+                <EvidencePanel />
+              </div>
+            )}
+          </div>
+
+          {evidenceDrawerOpen && (
+            <>
+              <div
+                className="fixed inset-0 z-30 bg-black/20 xl:hidden"
+                onClick={() => setEvidenceDrawerOpen(false)}
+              />
+              <aside className="fixed inset-y-12 right-0 z-40 w-[min(28rem,92vw)] border-l bg-background p-3 shadow-xl xl:hidden">
+                <EvidencePanel />
+              </aside>
+            </>
+          )}
+
+          {pipelineDrawerOpen && (
+            <>
+              <div
+                className="fixed inset-0 z-30 bg-black/20 lg:hidden"
+                onClick={() => setPipelineDrawerOpen(false)}
+              />
+              <aside className="fixed inset-y-12 left-0 z-40 w-[min(28rem,92vw)] border-r bg-background p-3 shadow-xl lg:hidden">
+                <PipelinePanel />
+              </aside>
+            </>
+          )}
+        </main>
       </div>
 
-      <style jsx>{`
-        .page {
-          min-height: 100vh;
-          background: var(--background);
-        }
-        .header {
-          display: flex;
-          align-items: center;
-          justify-content: space-between;
-          padding: 16px 32px;
-          border-bottom: 1px solid var(--border);
-        }
-        .header-left {
-          display: flex;
-          align-items: baseline;
-          gap: 14px;
-        }
-        .title {
-          font-size: 18px;
-          font-weight: 700;
-          letter-spacing: -0.02em;
-          color: var(--foreground);
-        }
-        .subtitle {
-          font-size: 12px;
-          color: var(--muted-fg);
-        }
-        .header-right {
-          display: flex;
-          align-items: center;
-          gap: 8px;
-        }
-        .health {
-          display: flex;
-          align-items: center;
-          gap: 6px;
-          font-size: 12px;
-          color: var(--muted-fg);
-        }
-        .dot {
-          display: inline-block;
-          width: 6px;
-          height: 6px;
-          border-radius: 50%;
-        }
-        .dot.green {
-          background: var(--success);
-        }
-        .dot.red {
-          background: var(--danger);
-        }
-        .container {
-          max-width: 900px;
-          margin: 0 auto;
-          padding: 32px 24px 64px;
-        }
-        .running-indicator {
-          display: flex;
-          align-items: center;
-          gap: 12px;
-          margin-top: 24px;
-          color: var(--muted-fg);
-          font-size: 13px;
-        }
-        .spinner {
-          width: 14px;
-          height: 14px;
-          border: 2px solid var(--border);
-          border-top-color: var(--accent);
-          border-radius: 50%;
-          animation: spin 0.8s linear infinite;
-        }
-        @keyframes spin {
-          to {
-            transform: rotate(360deg);
-          }
-        }
-        .error-box {
-          margin-top: 20px;
-          border: 1px solid var(--danger);
-          border-radius: 6px;
-          padding: 12px 16px;
-          color: var(--danger);
-          font-size: 13px;
-        }
-        .bandit-section {
-          margin-top: 40px;
-          border-top: 1px solid var(--border);
-          padding-top: 24px;
-        }
-        .section-title {
-          font-size: 11px;
-          text-transform: uppercase;
-          letter-spacing: 0.08em;
-          color: var(--muted-fg);
-          margin-bottom: 16px;
-        }
-        .bandit-grid {
-          display: grid;
-          grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
-          gap: 12px;
-        }
-        .bandit-card {
-          border: 1px solid var(--border);
-          border-radius: 8px;
-          overflow: hidden;
-        }
-        .bandit-type {
-          background: var(--card-bg);
-          border-bottom: 1px solid var(--border);
-          padding: 8px 12px;
-          font-size: 11px;
-          color: var(--muted-fg);
-          text-transform: uppercase;
-          letter-spacing: 0.06em;
-        }
-        .bandit-table {
-          width: 100%;
-          border-collapse: collapse;
-          font-size: 12px;
-        }
-        .bandit-table th {
-          padding: 6px 12px;
-          text-align: left;
-          color: var(--muted-fg);
-          font-weight: 400;
-          border-bottom: 1px solid var(--border);
-          font-size: 11px;
-        }
-        .bandit-table td {
-          padding: 6px 12px;
-          border-bottom: 1px solid var(--border);
-          opacity: 0.9;
-        }
-        .bandit-table tr:last-child td {
-          border-bottom: none;
-        }
-        .cfg {
-          color: var(--accent);
-          font-weight: 600;
-        }
-      `}</style>
-    </main>
+      {metricsModalOpen && (
+        <DataSourceModal
+          title="Metrics"
+          description="Quality, retrieval, and system measurements for the current run."
+          onClose={() => setMetricsModalOpen(false)}
+          size="medium"
+        >
+          <MetricsPanel />
+        </DataSourceModal>
+      )}
+
+      {strategyModalOpen && (
+        <DataSourceModal
+          title="Strategy Learning"
+          description="Bandit memory and historical config performance across query types."
+          onClose={() => setStrategyModalOpen(false)}
+          size="medium"
+        >
+          <BanditViewer />
+        </DataSourceModal>
+      )}
+
+      {documentsModalOpen && (
+        <DataSourceModal
+          title="Documents"
+          description="Upload, inspect, and remove indexed source documents."
+          onClose={() => setDocumentsModalOpen(false)}
+          size="compact"
+        >
+          <FileUpload />
+        </DataSourceModal>
+      )}
+
+      {papersModalOpen && (
+        <DataSourceModal
+          title="HuggingFace Trending"
+          description="Select trending research papers and load them into the knowledge base."
+          onClose={() => setPapersModalOpen(false)}
+          size="wide"
+        >
+          <HuggingFacePapers />
+        </DataSourceModal>
+      )}
+
+      {configsModalOpen && (
+        <DataSourceModal
+          title="Available Configs"
+          description="Reference view of the retrieval configurations available to the bandit and planner."
+          onClose={() => setConfigsModalOpen(false)}
+          size="medium"
+        >
+          <div className="grid gap-3 md:grid-cols-2">
+            {CONFIG_SUMMARIES.map((config) => (
+              <div key={config.name} className="rounded-lg border bg-background p-4">
+                <div className="flex items-center gap-2">
+                  <span className="rounded bg-muted px-2 py-1 font-mono text-xs font-semibold text-foreground">
+                    {config.name}
+                  </span>
+                  <span className="text-xs font-medium text-muted-foreground">
+                    Retrieval Config
+                  </span>
+                </div>
+                <p className="mt-3 font-mono text-xs leading-6 text-foreground/90">
+                  {config.description}
+                </p>
+              </div>
+            ))}
+          </div>
+        </DataSourceModal>
+      )}
+    </div>
   );
 }
