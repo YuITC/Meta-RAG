@@ -2,6 +2,11 @@
 
 A self-optimizing RAG (Retrieval-Augmented Generation) pipeline that classifies queries, runs hybrid retrieval (dense + BM25), evaluates its own answers, and uses Thompson Sampling to adapt retrieval configurations over time.
 
+<p align="center">
+  <img src="assets/demo1.png" width="45%" />
+  <img src="assets/demo2.png" width="45%" />
+</p>
+
 ## Features
 
 - **Adaptive Retrieval** — Thompson Sampling bandit selects the best retrieval configuration per query type, learning from each run
@@ -21,7 +26,7 @@ A self-optimizing RAG (Retrieval-Augmented Generation) pipeline that classifies 
 ┌────────────────────────────────────────────────────────────────────────┐
 │                        LangGraph Pipeline                              │
 │                                                                        │
-│  plan → query_rewrite → retrieve → read → controller ─┐               │
+│  plan → query_rewrite → retrieve → read → controller ──┐               │
 │                              ▲                         │               │
 │                              └── (extra_hop/reform.) ──┘               │
 │                                                        │               │
